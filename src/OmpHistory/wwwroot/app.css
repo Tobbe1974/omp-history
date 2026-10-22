@@ -362,6 +362,35 @@ html, body {
     filter: brightness(1.08);
 }
 
+.filter-btn-danger {
+    background-color: var(--danger-color);
+    border-color: var(--danger-color);
+    color: #ffffff;
+}
+
+.filter-btn-danger:hover {
+    filter: brightness(1.08);
+}
+
+.delete-confirm-text {
+    font-size: 13.5px;
+    color: var(--text-primary);
+    line-height: 1.5;
+}
+
+.delete-confirm-subtext {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.delete-confirm-subtext code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    color: #79c0ff;
+    background-color: #2b3240;
+    padding: 1px 5px;
+    border-radius: 4px;
+}
+
 .pane-body {
     flex: 1;
     overflow-y: auto;
@@ -369,6 +398,101 @@ html, body {
     display: flex;
     flex-direction: column;
     gap: 8px;
+}
+
+.sessions-footer {
+    position: relative;
+    padding: 8px 10px;
+    background-color: var(--bg-surface);
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+}
+
+.settings-cog-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-elevated);
+    color: var(--text-secondary);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.12s ease;
+}
+
+.settings-cog-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--accent-color);
+}
+
+.settings-cog-btn.active {
+    background-color: var(--accent-soft);
+    border-color: var(--accent-color);
+    color: #79c0ff;
+}
+
+.settings-popover {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 10px;
+    right: 10px;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+    padding: 12px;
+    z-index: 1000;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.settings-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.settings-popover-close {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 4px;
+}
+
+.settings-popover-close:hover {
+    color: var(--text-primary);
+}
+
+.settings-checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-primary);
+    cursor: pointer;
+    user-select: none;
+}
+
+.settings-checkbox-row input[type="checkbox"] {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent-color);
+    cursor: pointer;
 }
 
 .empty-state {
@@ -413,6 +537,16 @@ html, body {
     font-size: 13.5px;
     font-weight: 600;
     color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 4px;
+}
+
+.session-id {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -611,4 +745,20 @@ html, body {
 
 .markdown-body a {
     color: var(--accent-color);
+}
+
+.markdown-body .mermaid-diagram {
+    background-color: #0b0e14;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 16px;
+    margin-bottom: 1em;
+    overflow-x: auto;
+    display: flex;
+    justify-content: center;
+}
+
+.markdown-body .mermaid-diagram svg {
+    max-width: 100%;
+    height: auto;
 }

@@ -145,10 +145,10 @@ public sealed class HistoryRepository
         using var conn = OpenConnection();
         using var tx = conn.BeginTransaction();
 
+        var fallbackRepo = string.IsNullOrWhiteSpace(repo) ? "unknown" : repo.Trim();
         using (var ensureCmd = conn.CreateCommand())
         {
             ensureCmd.Transaction = tx;
-            var fallbackRepo = string.IsNullOrWhiteSpace(repo) ? "unknown" : repo.Trim();
             var fallbackName = !string.IsNullOrWhiteSpace(sessionName)
                 ? sessionName.Trim()
                 : FirstLinePreview(prompt, 60);
@@ -169,6 +169,18 @@ public sealed class HistoryRepository
             ensureCmd.ExecuteNonQuery();
         }
 
+        string effectiveRepo = fallbackRepo;
+        using (var repoCmd = conn.CreateCommand())
+        {
+            repoCmd.Transaction = tx;
+            repoCmd.CommandText = "SELECT repo FROM sessions WHERE session_id = $sessionId;";
+            repoCmd.Parameters.AddWithValue("$sessionId", sessionId);
+            if (repoCmd.ExecuteScalar() is string dbRepo && !string.IsNullOrWhiteSpace(dbRepo))
+            {
+                effectiveRepo = dbRepo;
+            }
+        }
+
         long id;
         using (var insertCmd = conn.CreateCommand())
         {
@@ -186,7 +198,7 @@ public sealed class HistoryRepository
         }
 
         tx.Commit();
-        _notifier.NotifyChanged();
+        _notifier.NotifyConversationAdded(effectiveRepo, sessionId, id);
 
         return new ConversationRecord(id, sessionId, prompt, responseMd, now);
     }

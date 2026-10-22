@@ -10,13 +10,16 @@ interface ContentBlock {
 
 interface RoleMessage {
   role?: string;
+  stopReason?: string;
   content?: unknown;
 }
 
 interface SessionEntryRecord {
+  id?: string;
   type?: string;
   title?: string;
   role?: string;
+  stopReason?: string;
   content?: unknown;
   message?: RoleMessage;
 }
@@ -169,7 +172,10 @@ export function resolveRepoName(cwd: string): string {
 
 export function extractTextFromContent(content: unknown): string {
   if (typeof content === "string") {
-    return content.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+    return content
+      .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+      .replace(/<system-notice>[\s\S]*?<\/system-notice>/g, "")
+      .trim();
   }
   if (!Array.isArray(content)) {
     return "";
@@ -181,7 +187,10 @@ export function extractTextFromContent(content: unknown): string {
     const block = item as ContentBlock;
     // Only extract plain "text" blocks; ignore "thinking", "toolCall", etc.
     if (block.type === "text" && typeof block.text === "string") {
-      const cleaned = block.text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+      const cleaned = block.text
+        .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+        .replace(/<system-notice>[\s\S]*?<\/system-notice>/g, "")
+        .trim();
       if (cleaned) {
         parts.push(cleaned);
       }
@@ -192,7 +201,7 @@ export function extractTextFromContent(content: unknown): string {
 
 export function extractLatestTurnFromMessages(
   messages: SessionEntryRecord[],
-): { prompt: string; responseMd: string } | undefined {
+): { prompt: string; responseMd: string; aborted?: boolean } | undefined {
   if (!Array.isArray(messages) || messages.length === 0) return undefined;
 
   let lastUserIdx = -1;
@@ -212,21 +221,22 @@ export function extractLatestTurnFromMessages(
   const prompt = extractTextFromContent(userMsg?.content);
   if (!prompt) return undefined;
 
-  let finalAssistantText = "";
+  // Check if the final assistant message in this turn was aborted or errored
   for (let i = messages.length - 1; i > lastUserIdx; i--) {
     const msgRaw = messages[i];
     const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
     if (msg?.role === "assistant") {
+      if (msg.stopReason === "aborted" || msg.stopReason === "error") {
+        return { prompt, responseMd: "", aborted: true };
+      }
       const text = extractTextFromContent(msg?.content);
       if (text) {
-        finalAssistantText = text;
-        break;
+        return { prompt, responseMd: text };
       }
     }
   }
 
-  if (!finalAssistantText) return undefined;
-  return { prompt, responseMd: finalAssistantText };
+  return undefined;
 }
 
 export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
@@ -427,7 +437,10 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   pi.on("before_agent_start", async (event, ctx) => {
     if (ctx?.agent?.kind && ctx.agent.kind !== "main") return;
     if (typeof event?.prompt === "string" && event.prompt.trim().length > 0) {
-      latestUserPrompt = event.prompt.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+      latestUserPrompt = event.prompt
+        .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
+        .replace(/<system-notice>[\s\S]*?<\/system-notice>/g, "")
+        .trim();
       promptInFlight = true;
     }
     await checkAndSyncSessionRename(ctx);
@@ -445,26 +458,24 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     const branchEntries = ctx?.sessionManager?.getBranch?.() ?? [];
 
     const fromEvent = extractLatestTurnFromMessages(eventMessages);
-    const fromBranch = !fromEvent ? extractLatestTurnFromMessages(branchEntries) : undefined;
-
-    const prompt = fromEvent?.prompt ?? fromBranch?.prompt ?? latestUserPrompt;
-    let responseMd = fromEvent?.responseMd ?? fromBranch?.responseMd;
-
-    if (!responseMd && eventMessages.length > 0) {
-      for (let i = eventMessages.length - 1; i >= 0; i--) {
-        const msg = eventMessages[i];
-        const unwrapped = msg?.type === "message" && msg?.message ? msg.message : msg;
-        if (unwrapped?.role === "assistant") {
-          const text = extractTextFromContent(unwrapped?.content);
-          if (text) {
-            responseMd = text;
-            break;
-          }
-        }
-      }
+    if (fromEvent?.aborted) {
+      promptInFlight = false;
+      return;
     }
 
-    if (!prompt || !responseMd) return;
+    const fromBranch = !fromEvent ? extractLatestTurnFromMessages(branchEntries) : undefined;
+    if (fromBranch?.aborted) {
+      promptInFlight = false;
+      return;
+    }
+
+    const prompt = fromEvent?.prompt ?? fromBranch?.prompt;
+    const responseMd = fromEvent?.responseMd ?? fromBranch?.responseMd;
+
+    if (!prompt || !responseMd) {
+      promptInFlight = false;
+      return;
+    }
     if (!promptInFlight && !fromEvent) return;
 
     promptInFlight = false;

@@ -17,6 +17,52 @@
 <body>
     <Routes />
     <ReconnectModal />
+    <script src="@Assets["lib/mermaid.min.js"]"></script>
+    <script>
+        window.ompHistoryRenderMermaid = async function () {
+            if (!window.mermaid) return;
+            if (!window.__ompMermaidInitialized) {
+                window.mermaid.initialize({
+                    startOnLoad: false,
+                    theme: 'dark',
+                    securityLevel: 'loose'
+                });
+                window.__ompMermaidInitialized = true;
+            }
+
+            const blocks = document.querySelectorAll('.markdown-body pre.mermaid, .markdown-body pre > code.language-mermaid, .markdown-body div.mermaid');
+            const nodesToRender = [];
+
+            blocks.forEach((el) => {
+                if (el.tagName.toLowerCase() === 'code') {
+                    const pre = el.parentElement;
+                    if (!pre) return;
+                    const container = document.createElement('div');
+                    container.className = 'mermaid-diagram';
+                    container.textContent = el.textContent || '';
+                    pre.replaceWith(container);
+                    nodesToRender.push(container);
+                } else if (el.tagName.toLowerCase() === 'pre') {
+                    const container = document.createElement('div');
+                    container.className = 'mermaid-diagram';
+                    container.textContent = el.textContent || '';
+                    el.replaceWith(container);
+                    nodesToRender.push(container);
+                } else if (!el.getAttribute('data-processed')) {
+                    el.classList.add('mermaid-diagram');
+                    nodesToRender.push(el);
+                }
+            });
+
+            if (nodesToRender.length > 0) {
+                try {
+                    await window.mermaid.run({ nodes: nodesToRender });
+                } catch (err) {
+                    console.error('Mermaid render error:', err);
+                }
+            }
+        };
+    </script>
     <script src="@Assets["_framework/blazor.web.js"]"></script>
 </body>
 

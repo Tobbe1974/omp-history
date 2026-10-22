@@ -148,7 +148,7 @@ html, body {
 /* Workspace Panes */
 .history-workspace {
     display: grid;
-    grid-template-columns: 280px 320px 1fr;
+    grid-template-columns: 310px 320px 1fr;
     flex: 1;
     min-height: 0;
     overflow: hidden;
@@ -545,11 +545,12 @@ html, body {
 
 .session-id {
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 11px;
+    font-size: 9.5px;
+    letter-spacing: -0.2px;
     color: var(--text-muted);
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    user-select: all;
+    cursor: text;
     margin-bottom: 4px;
 }
 

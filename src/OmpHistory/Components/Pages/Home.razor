@@ -1,0 +1,346 @@
+@page "/"
+@rendermode InteractiveServer
+@implements IDisposable
+@using Markdig
+@inject HistoryRepository Repository
+@inject HistoryNotifier Notifier
+
+<PageTitle>OMP History</PageTitle>
+
+<div class="history-app">
+    <header class="history-header">
+        <div class="brand">
+            <span class="brand-dot"></span>
+            <span class="brand-title">OMP History</span>
+        </div>
+
+        <div class="repo-selector">
+            <span class="repo-label">REPO</span>
+            @if (_repos.Count == 0)
+            {
+                <span class="repo-empty">No repositories recorded yet</span>
+            }
+            else
+            {
+                <div class="repo-pills" role="tablist" aria-label="Repositories">
+                    @foreach (var repo in _repos)
+                    {
+                        var isSelected = string.Equals(repo.Repo, _selectedRepo, StringComparison.Ordinal);
+                        <button type="button"
+                                class="repo-pill @(isSelected ? "active" : "")"
+                                @onclick="() => SelectRepo(repo.Repo)">
+                            <span class="repo-name">@repo.Repo</span>
+                            <span class="repo-count">@repo.SessionCount</span>
+                        </button>
+                    }
+                </div>
+            }
+        </div>
+
+        <div class="header-status">
+            <span class="live-indicator"></span>
+            <span>Live</span>
+        </div>
+    </header>
+
+    <div class="history-workspace">
+        <!-- Pane 1: Sessions in selected repo -->
+        <aside class="pane sessions-pane" aria-label="Sessions">
+            <div class="pane-header">
+                <span>SESSIONS @(string.IsNullOrEmpty(_selectedRepo) ? "" : $"({_sessions.Count})")</span>
+            </div>
+
+            <div class="pane-body">
+                @if (string.IsNullOrEmpty(_selectedRepo))
+                {
+                    <div class="empty-state">Select or create a session from OMP to begin.</div>
+                }
+                else if (_sessions.Count == 0)
+                {
+                    <div class="empty-state">No sessions in <strong>@_selectedRepo</strong>.</div>
+                }
+                else
+                {
+                    @foreach (var session in _sessions)
+                    {
+                        var isSelected = string.Equals(session.SessionId, _selectedSessionId, StringComparison.Ordinal);
+                        <div class="list-card session-card @(isSelected ? "selected" : "")"
+                             @onclick="() => SelectSession(session.SessionId)">
+                            <div class="session-card-main">
+                                <div class="session-title" title="@session.Name">@session.Name</div>
+                                <div class="session-meta">
+                                    <span>@session.ConversationCount @(session.ConversationCount == 1 ? "turn" : "turns")</span>
+                                    <span>•</span>
+                                    <span title="@session.UpdatedAt">@FormatTimestamp(session.UpdatedAt)</span>
+                                </div>
+                            </div>
+                            <button type="button"
+                                    class="delete-session-btn"
+                                    title="Delete session"
+                                    aria-label="Delete session @session.Name"
+                                    @onclick:stopPropagation="true"
+                                    @onclick="() => DeleteSession(session.SessionId)">
+                                ×
+                            </button>
+                        </div>
+                    }
+                }
+            </div>
+        </aside>
+
+        <!-- Pane 2: Conversations in selected session -->
+        <section class="pane conversations-pane" aria-label="Conversations">
+            <div class="pane-header">
+                <span>CONVERSATIONS @(_conversations.Count > 0 ? $"({_conversations.Count})" : "")</span>
+            </div>
+
+            <div class="pane-body">
+                @if (string.IsNullOrEmpty(_selectedSessionId))
+                {
+                    <div class="empty-state">Select a session to view its conversations.</div>
+                }
+                else if (_conversations.Count == 0)
+                {
+                    <div class="empty-state">No conversations recorded for this session yet.</div>
+                }
+                else
+                {
+                    @for (var i = 0; i < _conversations.Count; i++)
+                    {
+                        var turnNumber = i + 1;
+                        var conv = _conversations[i];
+                        var isSelected = conv.Id == _selectedConversationId;
+                        <div class="list-card conversation-card @(isSelected ? "selected" : "")"
+                             @onclick="() => SelectConversation(conv.Id)">
+                            <div class="conversation-header">
+                                <span class="turn-badge">#@turnNumber</span>
+                                <span class="turn-time">@FormatTimestamp(conv.CreatedAt)</span>
+                            </div>
+                            <div class="conversation-preview">@TruncatePreview(conv.Prompt, 110)</div>
+                        </div>
+                    }
+                }
+            </div>
+        </section>
+
+        <!-- Pane 3: Conversation detail (Question/Task + Markdown Response) -->
+        <main class="pane detail-pane" aria-label="Conversation Details">
+            @if (SelectedConversation is null)
+            {
+                <div class="empty-detail">
+                    <div class="empty-state">Select a conversation to view the question and model response.</div>
+                </div>
+            }
+            else
+            {
+                <div class="detail-scroll">
+                    <section class="detail-section prompt-section">
+                        <div class="section-label">
+                            <span>USER QUESTION / TASK</span>
+                            <span class="section-timestamp">@FormatTimestamp(SelectedConversation.CreatedAt)</span>
+                        </div>
+                        <div class="prompt-box">@SelectedConversation.Prompt</div>
+                    </section>
+
+                    <section class="detail-section response-section">
+                        <div class="section-label">
+                            <span>MODEL RESPONSE</span>
+                        </div>
+                        <div class="markdown-body">
+                            @((MarkupString)RenderMarkdown(SelectedConversation.ResponseMd))
+                        </div>
+                    </section>
+                </div>
+            }
+        </main>
+    </div>
+</div>
+
+@code {
+    private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
+        .UseAdvancedExtensions()
+        .Build();
+
+    private IReadOnlyList<RepoSummary> _repos = [];
+    private IReadOnlyList<SessionRecord> _sessions = [];
+    private IReadOnlyList<ConversationRecord> _conversations = [];
+
+    private string? _selectedRepo;
+    private string? _selectedSessionId;
+    private long? _selectedConversationId;
+
+    private ConversationRecord? SelectedConversation =>
+        _selectedConversationId.HasValue
+            ? _conversations.FirstOrDefault(c => c.Id == _selectedConversationId.Value)
+            : null;
+
+    protected override void OnInitialized()
+    {
+        Notifier.OnChanged += HandleHistoryChanged;
+        RefreshState();
+    }
+
+    private void HandleHistoryChanged()
+    {
+        _ = InvokeAsync(() =>
+        {
+            RefreshState();
+            StateHasChanged();
+        });
+    }
+
+    private void RefreshState()
+    {
+        _repos = Repository.GetRepos();
+
+        if (_repos.Count == 0)
+        {
+            _selectedRepo = null;
+            _sessions = [];
+            _selectedSessionId = null;
+            _conversations = [];
+            _selectedConversationId = null;
+            return;
+        }
+
+        if (string.IsNullOrEmpty(_selectedRepo) || !_repos.Any(r => string.Equals(r.Repo, _selectedRepo, StringComparison.Ordinal)))
+        {
+            _selectedRepo = _repos[0].Repo;
+        }
+
+        LoadSessionsForSelectedRepo(preserveSessionSelection: true);
+    }
+
+    private void SelectRepo(string repo)
+    {
+        if (string.Equals(_selectedRepo, repo, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _selectedRepo = repo;
+        _selectedSessionId = null;
+        _selectedConversationId = null;
+        LoadSessionsForSelectedRepo(preserveSessionSelection: false);
+    }
+
+    private void LoadSessionsForSelectedRepo(bool preserveSessionSelection)
+    {
+        if (string.IsNullOrEmpty(_selectedRepo))
+        {
+            _sessions = [];
+            _selectedSessionId = null;
+            _conversations = [];
+            _selectedConversationId = null;
+            return;
+        }
+
+        _sessions = Repository.GetSessionsByRepo(_selectedRepo);
+
+        if (_sessions.Count == 0)
+        {
+            _selectedSessionId = null;
+            _conversations = [];
+            _selectedConversationId = null;
+            return;
+        }
+
+        var sessionStillExists = preserveSessionSelection
+            && !string.IsNullOrEmpty(_selectedSessionId)
+            && _sessions.Any(s => string.Equals(s.SessionId, _selectedSessionId, StringComparison.Ordinal));
+
+        if (!sessionStillExists)
+        {
+            _selectedSessionId = _sessions[0].SessionId;
+            LoadConversationsForSelectedSession(selectFirst: true);
+        }
+        else
+        {
+            LoadConversationsForSelectedSession(selectFirst: false);
+        }
+    }
+
+    private void SelectSession(string sessionId)
+    {
+        _selectedSessionId = sessionId;
+        LoadConversationsForSelectedSession(selectFirst: true);
+    }
+
+    private void LoadConversationsForSelectedSession(bool selectFirst)
+    {
+        if (string.IsNullOrEmpty(_selectedSessionId))
+        {
+            _conversations = [];
+            _selectedConversationId = null;
+            return;
+        }
+
+        _conversations = Repository.GetConversations(_selectedSessionId);
+
+        if (_conversations.Count == 0)
+        {
+            _selectedConversationId = null;
+            return;
+        }
+
+        if (selectFirst || !_selectedConversationId.HasValue || !_conversations.Any(c => c.Id == _selectedConversationId.Value))
+        {
+            _selectedConversationId = _conversations[0].Id;
+        }
+    }
+
+    private void SelectConversation(long conversationId)
+    {
+        _selectedConversationId = conversationId;
+    }
+
+    private void DeleteSession(string sessionId)
+    {
+        var wasSelected = string.Equals(_selectedSessionId, sessionId, StringComparison.Ordinal);
+        if (wasSelected)
+        {
+            _selectedSessionId = null;
+            _selectedConversationId = null;
+        }
+        Repository.DeleteSession(sessionId);
+    }
+
+    private static string RenderMarkdown(string? markdown)
+    {
+        if (string.IsNullOrWhiteSpace(markdown))
+        {
+            return "<em>(Empty response)</em>";
+        }
+        return Markdown.ToHtml(markdown, Pipeline);
+    }
+
+    private static string TruncatePreview(string? text, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "(empty)";
+        }
+
+        var singleLine = string.Join(" ", text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        return singleLine.Length <= maxLength ? singleLine : singleLine[..maxLength] + "…";
+    }
+
+    private static string FormatTimestamp(string iso)
+    {
+        if (DateTimeOffset.TryParse(iso, out var dto))
+        {
+            var local = dto.ToLocalTime();
+            if (local.Date == DateTimeOffset.Now.Date)
+            {
+                return local.ToString("HH:mm:ss");
+            }
+            return local.ToString("yyyy-MM-dd HH:mm");
+        }
+        return iso;
+    }
+
+    public void Dispose()
+    {
+        Notifier.OnChanged -= HandleHistoryChanged;
+    }
+}

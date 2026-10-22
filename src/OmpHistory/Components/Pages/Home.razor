@@ -91,7 +91,46 @@
         <!-- Pane 2: Conversations in selected session -->
         <section class="pane conversations-pane" aria-label="Conversations">
             <div class="pane-header">
-                <span>CONVERSATIONS @(_conversations.Count > 0 ? $"({_conversations.Count})" : "")</span>
+                <span>
+                    CONVERSATIONS
+                    @if (_conversations.Count > 0)
+                    {
+                        if (HasActiveFilter)
+                        {
+                            <span>(@FilteredConversations.Count / @_conversations.Count)</span>
+                        }
+                        else
+                        {
+                            <span>(@_conversations.Count)</span>
+                        }
+                    }
+                </span>
+
+                <div class="pane-header-actions">
+                    @if (HasActiveFilter)
+                    {
+                        <span class="active-filter-chip" title="Filtered by: @_appliedFilter">@_appliedFilter</span>
+                        <button type="button"
+                                class="funnel-btn clear-funnel-btn"
+                                title="Remove filter"
+                                aria-label="Remove conversation filter"
+                                @onclick="ClearFilter">
+                            <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M2.5 3.5h13l-5 6v5l-3 1.5v-6.5l-5-6z" />
+                                <path d="M14.5 12.5l4 4m0-4l-4 4" stroke-width="2" />
+                            </svg>
+                        </button>
+                    }
+                    <button type="button"
+                            class="funnel-btn @(HasActiveFilter || _isFilterModalOpen ? "active" : "")"
+                            title="Filter conversations"
+                            aria-label="Filter conversations"
+                            @onclick="OpenFilterModal">
+                        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M2.5 3.5h15l-6 6.5v5.5l-3 1.5v-7l-6-6.5z" />
+                        </svg>
+                    </button>
+                </div>
             </div>
 
             <div class="pane-body">
@@ -103,17 +142,22 @@
                 {
                     <div class="empty-state">No conversations recorded for this session yet.</div>
                 }
+                else if (FilteredConversations.Count == 0)
+                {
+                    <div class="empty-state">
+                        No conversations match <strong>"@_appliedFilter"</strong>.
+                    </div>
+                }
                 else
                 {
-                    @for (var i = 0; i < _conversations.Count; i++)
+                    @foreach (var item in FilteredConversations)
                     {
-                        var turnNumber = i + 1;
-                        var conv = _conversations[i];
+                        var conv = item.Record;
                         var isSelected = conv.Id == _selectedConversationId;
                         <div class="list-card conversation-card @(isSelected ? "selected" : "")"
                              @onclick="() => SelectConversation(conv.Id)">
                             <div class="conversation-header">
-                                <span class="turn-badge">#@turnNumber</span>
+                                <span class="turn-badge">#@item.TurnNumber</span>
                                 <span class="turn-time">@FormatTimestamp(conv.CreatedAt)</span>
                             </div>
                             <div class="conversation-preview">@TruncatePreview(conv.Prompt, 110)</div>
@@ -154,9 +198,50 @@
             }
         </main>
     </div>
+
+    @if (_isFilterModalOpen)
+    {
+        <div class="filter-modal-backdrop" @onclick="CloseFilterModal">
+            <div class="filter-modal-window" role="dialog" aria-modal="true" aria-label="Filter Conversations" @onclick:stopPropagation="true">
+                <div class="filter-modal-header">
+                    <span class="filter-modal-title">Filter Conversations</span>
+                    <button type="button" class="filter-modal-close" aria-label="Close filter window" @onclick="CloseFilterModal">×</button>
+                </div>
+                <div class="filter-modal-body">
+                    <label class="filter-input-label" for="conversation-filter-input">
+                        Search term (matches question or model response)
+                    </label>
+                    <input id="conversation-filter-input"
+                           type="text"
+                           class="filter-input"
+                           placeholder="Type search term…"
+                           @bind="_filterDraft"
+                           @bind:event="oninput"
+                           @onkeydown="HandleFilterKeyDown"
+                           autofocus />
+                </div>
+                <div class="filter-modal-footer">
+                    @if (HasActiveFilter)
+                    {
+                        <button type="button" class="filter-btn filter-btn-secondary" @onclick="ClearFilterFromModal">
+                            Clear Filter
+                        </button>
+                    }
+                    <button type="button" class="filter-btn filter-btn-secondary" @onclick="CloseFilterModal">
+                        Cancel
+                    </button>
+                    <button type="button" class="filter-btn filter-btn-primary" @onclick="ApplyFilter">
+                        Apply Filter
+                    </button>
+                </div>
+            </div>
+        </div>
+    }
 </div>
 
 @code {
+    private sealed record IndexedConversation(int TurnNumber, ConversationRecord Record);
+
     private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
         .UseAdvancedExtensions()
         .Build();
@@ -169,9 +254,38 @@
     private string? _selectedSessionId;
     private long? _selectedConversationId;
 
+    private bool _isFilterModalOpen;
+    private string _filterDraft = string.Empty;
+    private string _appliedFilter = string.Empty;
+
+    private bool HasActiveFilter => !string.IsNullOrWhiteSpace(_appliedFilter);
+
+    private IReadOnlyList<IndexedConversation> FilteredConversations
+    {
+        get
+        {
+            var list = new List<IndexedConversation>(_conversations.Count);
+            var term = _appliedFilter.Trim();
+            var hasFilter = term.Length > 0;
+
+            for (var i = 0; i < _conversations.Count; i++)
+            {
+                var c = _conversations[i];
+                if (!hasFilter
+                    || (c.Prompt?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+                    || (c.ResponseMd?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    list.Add(new IndexedConversation(i + 1, c));
+                }
+            }
+
+            return list;
+        }
+    }
+
     private ConversationRecord? SelectedConversation =>
         _selectedConversationId.HasValue
-            ? _conversations.FirstOrDefault(c => c.Id == _selectedConversationId.Value)
+            ? FilteredConversations.Select(x => x.Record).FirstOrDefault(c => c.Id == _selectedConversationId.Value)
             : null;
 
     protected override void OnInitialized()
@@ -276,22 +390,72 @@
         }
 
         _conversations = Repository.GetConversations(_selectedSessionId);
+        EnsureValidFilteredSelection(selectFirst);
+    }
 
-        if (_conversations.Count == 0)
+    private void EnsureValidFilteredSelection(bool selectFirst)
+    {
+        var visible = FilteredConversations;
+        if (visible.Count == 0)
         {
             _selectedConversationId = null;
             return;
         }
 
-        if (selectFirst || !_selectedConversationId.HasValue || !_conversations.Any(c => c.Id == _selectedConversationId.Value))
+        if (selectFirst || !_selectedConversationId.HasValue || !visible.Any(c => c.Record.Id == _selectedConversationId.Value))
         {
-            _selectedConversationId = _conversations[0].Id;
+            _selectedConversationId = visible[0].Record.Id;
         }
     }
 
     private void SelectConversation(long conversationId)
     {
         _selectedConversationId = conversationId;
+    }
+
+    private void OpenFilterModal()
+    {
+        _filterDraft = _appliedFilter;
+        _isFilterModalOpen = true;
+    }
+
+    private void CloseFilterModal()
+    {
+        _isFilterModalOpen = false;
+    }
+
+    private void ApplyFilter()
+    {
+        _appliedFilter = _filterDraft.Trim();
+        _isFilterModalOpen = false;
+        EnsureValidFilteredSelection(selectFirst: true);
+    }
+
+    private void ClearFilter()
+    {
+        _appliedFilter = string.Empty;
+        _filterDraft = string.Empty;
+        EnsureValidFilteredSelection(selectFirst: false);
+    }
+
+    private void ClearFilterFromModal()
+    {
+        _appliedFilter = string.Empty;
+        _filterDraft = string.Empty;
+        _isFilterModalOpen = false;
+        EnsureValidFilteredSelection(selectFirst: false);
+    }
+
+    private void HandleFilterKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            ApplyFilter();
+        }
+        else if (e.Key == "Escape")
+        {
+            CloseFilterModal();
+        }
     }
 
     private void DeleteSession(string sessionId)

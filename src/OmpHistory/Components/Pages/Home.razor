@@ -38,14 +38,29 @@
             }
         </div>
 
-        <div class="header-status">
-            <span class="live-indicator"></span>
-            <span>Live</span>
+        <div class="header-actions">
+            <button type="button"
+                    class="pin-panes-btn @(_isPanesPinned ? "active" : "")"
+                    title="@(_isPanesPinned ? "Unpin to hide Sessions and Conversations" : "Pin to show Sessions and Conversations")"
+                    aria-label="Pin Sessions and Conversations panes"
+                    aria-pressed="@(_isPanesPinned ? "true" : "false")"
+                    @onclick="TogglePanesPinned">
+                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M9.5 2.5L13.5 6.5L12 8L9.5 7.5L6.5 10.5L7 13L5.5 14.5L3 12L1.5 14.5L3.5 12.5L1.5 10.5L3 9L5.5 9.5L8.5 6.5L8 4L9.5 2.5Z" />
+                </svg>
+                <span>Pin Lists</span>
+            </button>
+
+            <div class="header-status">
+                <span class="live-indicator"></span>
+                <span>Live</span>
+            </div>
         </div>
     </header>
 
-    <div class="history-workspace">
-        <!-- Pane 1: Sessions in selected repo -->
+    <div class="history-workspace @(_isPanesPinned ? "" : "panes-unpinned")">
+        @if (_isPanesPinned)
+        {
         <aside class="pane sessions-pane" aria-label="Sessions">
             <div class="pane-header">
                 <span>SESSIONS @(string.IsNullOrEmpty(_selectedRepo) ? "" : $"({_sessions.Count})")</span>
@@ -199,6 +214,7 @@
                 }
             </div>
         </section>
+        }
 
         <!-- Pane 3: Conversation detail (Question/Task + Markdown Response) -->
         <main class="pane detail-pane" aria-label="Conversation Details">
@@ -323,6 +339,7 @@
     private bool _autoSelectNewConversation = true;
     private ConversationAddedEvent? _pendingAutoSelect;
     private SessionRecord? _sessionToDelete;
+    private bool _isPanesPinned = true;
 
     private bool HasActiveFilter => !string.IsNullOrWhiteSpace(_appliedFilter);
 
@@ -532,6 +549,11 @@
     private void CloseFilterModal()
     {
         _isFilterModalOpen = false;
+    }
+
+    private void TogglePanesPinned()
+    {
+        _isPanesPinned = !_isPanesPinned;
     }
 
     private void ApplyFilter()

@@ -1,8 +1,10 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_BASE_URL = "http://localhost:5180";
-
+const DEFAULT_PROJECT_DIR = "/home/tobbe/Projects/Personal/omp-hisitory/src/OmpHistory";
 interface ContentBlock {
   type?: string;
   text?: string;
@@ -239,6 +241,77 @@ export function extractLatestTurnFromMessages(
   return undefined;
 }
 
+export function resolveServerProjectDir(cwd?: string): string | undefined {
+  const candidates: string[] = [];
+  if (process.env.OMP_HISTORY_PROJECT_DIR?.trim()) {
+    candidates.push(process.env.OMP_HISTORY_PROJECT_DIR.trim());
+  }
+  if (cwd) {
+    candidates.push(path.resolve(cwd, "src", "OmpHistory"));
+    candidates.push(path.resolve(cwd));
+  }
+  try {
+    const extRepoDir = path.resolve(import.meta.dir, "..", "..", "src", "OmpHistory");
+    candidates.push(extRepoDir);
+  } catch {
+    // ignore
+  }
+  candidates.push(DEFAULT_PROJECT_DIR);
+  candidates.push(path.join(os.homedir(), "Projects", "Personal", "omp-hisitory", "src", "OmpHistory"));
+  candidates.push(path.join(os.homedir(), "Projects", "Personal", "omp-history", "src", "OmpHistory"));
+
+  for (const dir of candidates) {
+    try {
+      const csproj = path.join(dir, "OmpHistory.csproj");
+      if (fs.existsSync(csproj)) {
+        return dir;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return undefined;
+}
+
+export async function startOmpHistoryServer(baseUrl: string, cwd?: string): Promise<{ ok: boolean; error?: string }> {
+  const projectDir = resolveServerProjectDir(cwd);
+  if (!projectDir) {
+    return { ok: false, error: "Could not locate src/OmpHistory/OmpHistory.csproj" };
+  }
+
+  try {
+    const child = spawn("dotnet", ["run"], {
+      cwd: projectDir,
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  const probeUrl = `${baseUrl.replace(/\/+$/, "")}/api/repos`;
+  const deadline = Date.now() + 25_000;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(probeUrl, {
+        method: "GET",
+        signal: AbortSignal.timeout(1500),
+      });
+      if (res.ok) {
+        return { ok: true };
+      }
+    } catch {
+      // wait until server is listening
+    }
+    const { promise, resolve } = Promise.withResolvers<void>();
+    setTimeout(resolve, 400);
+    await promise;
+  }
+
+  return { ok: false, error: `Timed out waiting for omp-history server at ${baseUrl}` };
+}
+
 export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   let disabled = false;
   let activeSessionId: string | undefined;
@@ -325,9 +398,19 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
       if (ctx?.hasUI && typeof ctx?.ui?.select === "function") {
         try {
           const choice = await ctx.ui.select(
-            "Could not post to omp-history. Retry/Disable",
-            ["Retry", "Disable"],
+            "Could not post to omp-history. Start server/Retry/Disable",
+            ["Start server", "Retry", "Disable"],
           );
+          if (choice === "Start server") {
+            ctx.ui.notify?.("Starting omp-history server...", "info");
+            const started = await startOmpHistoryServer(baseUrl, ctx?.cwd);
+            if (started.ok) {
+              ctx.ui.notify?.(`omp-history server started at ${baseUrl}.`, "info");
+            } else {
+              ctx.ui.notify?.(`Failed to start omp-history server: ${started.error}`, "error");
+            }
+            continue;
+          }
           if (choice === "Retry") {
             continue;
           }
@@ -339,7 +422,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
           return false;
         }
       } else {
-        ctx?.ui?.notify?.("Could not post to omp-history. Retry/Disable", "warning");
+        ctx?.ui?.notify?.("Could not post to omp-history. Start server/Retry/Disable", "warning");
         return false;
       }
     }
@@ -494,9 +577,22 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   });
 
   pi.registerCommand("omp-history", {
-    description: "Enable, disable, or check status of omp-history logging (/omp-history [enable|disable|status])",
+    description: "Start, enable, disable, or check status of omp-history logging (/omp-history [start|enable|disable|status])",
     handler: async (args, ctx) => {
       const sub = (args || "").trim().toLowerCase();
+      const baseUrl = (process.env.OMP_HISTORY_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, "");
+      if (sub === "start") {
+        disabled = false;
+        ctx.ui?.notify?.("Starting omp-history server...", "info");
+        const started = await startOmpHistoryServer(baseUrl, ctx?.cwd);
+        if (started.ok) {
+          ctx.ui?.notify?.(`omp-history server started at ${baseUrl}.`, "info");
+          await syncSessionRegistration(ctx);
+        } else {
+          ctx.ui?.notify?.(`Failed to start omp-history server: ${started.error}`, "error");
+        }
+        return;
+      }
       if (sub === "enable" || sub === "on") {
         disabled = false;
         ctx.ui?.notify?.("omp-history enabled.", "info");
@@ -508,7 +604,6 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
         ctx.ui?.notify?.("omp-history disabled for this session.", "warning");
         return;
       }
-      const baseUrl = (process.env.OMP_HISTORY_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, "");
       ctx.ui?.notify?.(
         `omp-history: ${disabled ? "disabled" : "enabled"} (url=${baseUrl}, repo=${resolveRepoName(ctx?.cwd || process.cwd())})`,
         "info",

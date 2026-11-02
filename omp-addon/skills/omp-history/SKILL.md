@@ -22,10 +22,10 @@ alwaysApply: true
    - After a user question/task is answered (`agent_end`), posts `{ sessionId, repo, sessionName, prompt, responseMd }` to `POST /api/conversations`.
    - Includes **only the final Markdown response** (`type === "text"` blocks) and excludes all model thinking blocks (`thinking`) and intermediate tool outputs.
 
-4. **Error Handling (`Retry / Disable`)**:
+4. **Error Handling (`Start server / Retry / Disable`)**:
    - If posting to `omp-history` fails, prompts:
-     `"Could not post to omp-history. Retry/Disable"` with choices `Retry` and `Disable`.
-   - Selecting `Retry` immediately retries the request; selecting `Disable` disables posting for the remainder of the session (can be re-enabled anytime with `/omp-history enable`).
+     `"Could not post to omp-history. Start server/Retry/Disable"` with choices `Start server`, `Retry`, and `Disable`.
+   - Selecting `Start server` runs `dotnet run` in `src/OmpHistory` in the background, waits for `http://localhost:5180` to come online, and retries the request; selecting `Retry` immediately retries the request; selecting `Disable` disables posting for the remainder of the session (can be re-enabled anytime with `/omp-history enable` or `/omp-history start`).
 
 ## REST API Reference
 

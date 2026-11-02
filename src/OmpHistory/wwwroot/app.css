@@ -129,6 +129,39 @@ html, body {
     background-color: rgba(0, 0, 0, 0.25);
 }
 
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.pin-panes-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background-color: var(--bg-elevated);
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+}
+
+.pin-panes-btn:hover {
+    background-color: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.pin-panes-btn.active {
+    background-color: var(--accent-soft);
+    border-color: var(--accent-color);
+    color: #79c0ff;
+}
+
 .header-status {
     display: flex;
     align-items: center;
@@ -152,6 +185,10 @@ html, body {
     flex: 1;
     min-height: 0;
     overflow: hidden;
+}
+
+.history-workspace.panes-unpinned {
+    grid-template-columns: 1fr;
 }
 
 .pane {

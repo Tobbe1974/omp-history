@@ -9,7 +9,20 @@ builder.WebHost.UseStaticWebAssets();
 var urls = builder.Configuration["Urls"] ?? Environment.GetEnvironmentVariable("ASPNETCORE_URLS");
 if (string.IsNullOrWhiteSpace(urls))
 {
-    builder.WebHost.UseUrls("http://localhost:5180");
+    var envUrl = Environment.GetEnvironmentVariable("OMP_HISTORY_URL")?.Trim().TrimEnd('/');
+    var envPort = Environment.GetEnvironmentVariable("OMP_HISTORY_PORT")?.Trim();
+    if (!string.IsNullOrWhiteSpace(envUrl))
+    {
+        builder.WebHost.UseUrls(envUrl);
+    }
+    else if (!string.IsNullOrWhiteSpace(envPort))
+    {
+        builder.WebHost.UseUrls($"http://localhost:{envPort}");
+    }
+    else
+    {
+        builder.WebHost.UseUrls("http://localhost:5180");
+    }
 }
 
 builder.Services.AddSingleton<HistoryNotifier>();

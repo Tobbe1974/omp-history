@@ -6,7 +6,7 @@ alwaysApply: true
 
 # omp-history Skill & Addon
 
-`omp-history` records OMP sessions and completed user/assistant conversation turns into the local C# / Blazor / SQLite history server (`http://localhost:5180` by default, configurable via `OMP_HISTORY_URL`).
+`omp-history` records OMP sessions and completed user/assistant conversation turns into the local C# / Blazor / SQLite history server (`http://localhost:5180` by default, configurable via `OMP_HISTORY_PORT`, `OMP_HISTORY_URL`, and `OMP_HISTORY_DIR` / `OMP_HISTORY_PROJECT_DIR`).
 
 ## Behavior
 

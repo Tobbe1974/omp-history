@@ -3,8 +3,21 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const DEFAULT_BASE_URL = "http://localhost:5180";
-const DEFAULT_PROJECT_DIR = "/home/tobbe/Projects/Personal/omp-hisitory/src/OmpHistory";
+const DEFAULT_PORT = "5180";
+const DEFAULT_BASE_URL = `http://localhost:${DEFAULT_PORT}`;
+const DEFAULT_PROJECT_DIR = "/mnt/div/Projects/omp-history/src/OmpHistory";
+
+export function resolveBaseUrl(): string {
+  const explicitUrl = process.env.OMP_HISTORY_URL?.trim();
+  if (explicitUrl) {
+    return explicitUrl.replace(/\/+$/, "");
+  }
+  const port = process.env.OMP_HISTORY_PORT?.trim();
+  if (port) {
+    return `http://localhost:${port}`;
+  }
+  return DEFAULT_BASE_URL;
+}
 interface ContentBlock {
   type?: string;
   text?: string;
@@ -243,8 +256,13 @@ export function extractLatestTurnFromMessages(
 
 export function resolveServerProjectDir(cwd?: string): string | undefined {
   const candidates: string[] = [];
-  if (process.env.OMP_HISTORY_PROJECT_DIR?.trim()) {
-    candidates.push(process.env.OMP_HISTORY_PROJECT_DIR.trim());
+  const envDir =
+    process.env.OMP_HISTORY_PROJECT_DIR?.trim() ||
+    process.env.OMP_HISTORY_DIR?.trim() ||
+    process.env.OMP_HISTORY_PATH?.trim();
+  if (envDir) {
+    candidates.push(path.resolve(envDir, "src", "OmpHistory"));
+    candidates.push(path.resolve(envDir));
   }
   if (cwd) {
     candidates.push(path.resolve(cwd, "src", "OmpHistory"));
@@ -257,8 +275,9 @@ export function resolveServerProjectDir(cwd?: string): string | undefined {
     // ignore
   }
   candidates.push(DEFAULT_PROJECT_DIR);
-  candidates.push(path.join(os.homedir(), "Projects", "Personal", "omp-hisitory", "src", "OmpHistory"));
+  candidates.push("/mnt/div/Projects/omp-history/src/OmpHistory");
   candidates.push(path.join(os.homedir(), "Projects", "Personal", "omp-history", "src", "OmpHistory"));
+  candidates.push(path.join(os.homedir(), "Projects", "Personal", "omp-hisitory", "src", "OmpHistory"));
 
   for (const dir of candidates) {
     try {
@@ -279,18 +298,23 @@ export async function startOmpHistoryServer(baseUrl: string, cwd?: string): Prom
     return { ok: false, error: "Could not locate src/OmpHistory/OmpHistory.csproj" };
   }
 
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
   try {
-    const child = spawn("dotnet", ["run"], {
+    const child = spawn("dotnet", ["run", "--no-launch-profile", "--urls", normalizedBaseUrl], {
       cwd: projectDir,
       detached: true,
       stdio: "ignore",
+      env: {
+        ...process.env,
+        ASPNETCORE_URLS: normalizedBaseUrl,
+      },
     });
     child.unref();
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 
-  const probeUrl = `${baseUrl.replace(/\/+$/, "")}/api/repos`;
+  const probeUrl = `${normalizedBaseUrl}/api/repos`;
   const deadline = Date.now() + 25_000;
   while (Date.now() < deadline) {
     try {
@@ -378,7 +402,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   ): Promise<boolean> {
     if (disabled) return false;
 
-    const baseUrl = (process.env.OMP_HISTORY_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, "");
+    const baseUrl = resolveBaseUrl();
     const url = `${baseUrl}${endpointPath}`;
     while (!disabled) {
       try {
@@ -580,7 +604,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     description: "Start, enable, disable, or check status of omp-history logging (/omp-history [start|enable|disable|status])",
     handler: async (args, ctx) => {
       const sub = (args || "").trim().toLowerCase();
-      const baseUrl = (process.env.OMP_HISTORY_URL?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, "");
+      const baseUrl = resolveBaseUrl();
       if (sub === "start") {
         disabled = false;
         ctx.ui?.notify?.("Starting omp-history server...", "info");

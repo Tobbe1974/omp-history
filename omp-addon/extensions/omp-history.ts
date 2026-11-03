@@ -78,6 +78,14 @@ interface ExtensionHostAPI {
     (event: "agent_end", handler: (event: AgentEndEventView, ctx: ExtensionContextView) => Promise<void> | void): void;
   };
   getSessionName?: () => string | undefined;
+  sendUserMessage?: (
+    content: string,
+    options?: { deliverAs?: "steer" | "followUp" | "aside"; attribution?: "user" | "agent" },
+  ) => void;
+  sendMessage?: (
+    message: string | { content: string; display?: boolean },
+    options?: { deliverAs?: "steer" | "followUp" | "nextTurn" | "aside"; triggerTurn?: boolean },
+  ) => void;
   registerCommand: (
     name: string,
     config: {
@@ -497,6 +505,45 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     }
   }
 
+  async function pollHeartbeatAndFeedback(ctx: ExtensionContextView): Promise<void> {
+    if (disabled || (ctx?.agent?.kind && ctx.agent.kind !== "main")) return;
+
+    const sessionId = readSessionId(ctx);
+    if (!sessionId) return;
+
+    const baseUrl = resolveBaseUrl();
+    try {
+      const res = await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/heartbeat`, {
+        method: "POST",
+        signal: AbortSignal.timeout(2500),
+      });
+      if (!res.ok) return;
+
+      const data = (await res.json()) as {
+        items?: Array<{ id?: string; formattedMessage?: string; comment?: string }>;
+      };
+      if (!Array.isArray(data?.items) || data.items.length === 0) return;
+
+      for (const item of data.items) {
+        const msg = (item?.formattedMessage || item?.comment || "").trim();
+        if (!msg) continue;
+
+        latestUserPrompt = msg;
+        promptInFlight = true;
+
+        if (typeof pi.sendUserMessage === "function") {
+          pi.sendUserMessage(msg);
+          ctx.ui?.notify?.("Received feedback from omp-history.", "info");
+        } else if (typeof pi.sendMessage === "function") {
+          pi.sendMessage({ content: msg, display: true }, { triggerTurn: true });
+          ctx.ui?.notify?.("Received feedback from omp-history.", "info");
+        }
+      }
+    } catch {
+      // ignore transient heartbeat failure so we don't spam modal prompts
+    }
+  }
+
   pi.on("session_start", async (_event, ctx) => {
     if (ctx?.agent?.kind && ctx.agent.kind !== "main") return;
     await syncSessionRegistration(ctx);
@@ -504,7 +551,8 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     if (typeof ctx?.setInterval === "function") {
       ctx.setInterval(() => {
         void checkAndSyncSessionRename(ctx);
-      }, 3000);
+        void pollHeartbeatAndFeedback(ctx);
+      }, 2000);
     }
   });
 

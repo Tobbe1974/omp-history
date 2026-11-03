@@ -26,6 +26,7 @@ if (string.IsNullOrWhiteSpace(urls))
 }
 
 builder.Services.AddSingleton<HistoryNotifier>();
+builder.Services.AddSingleton<ActiveSessionTracker>();
 builder.Services.AddSingleton<HistoryRepository>(sp =>
 {
     var config = sp.GetRequiredService<IConfiguration>();
@@ -67,7 +68,7 @@ api.MapGet("/sessions", (string? repo, HistoryRepository repository) =>
     return Results.Ok(Array.Empty<SessionRecord>());
 });
 
-api.MapPost("/sessions", (CreateSessionRequest req, HistoryRepository repo) =>
+api.MapPost("/sessions", (CreateSessionRequest req, HistoryRepository repo, ActiveSessionTracker tracker) =>
 {
     if (string.IsNullOrWhiteSpace(req.SessionId))
     {
@@ -75,6 +76,7 @@ api.MapPost("/sessions", (CreateSessionRequest req, HistoryRepository repo) =>
     }
 
     repo.UpsertSession(req.SessionId, req.Repo, req.Name);
+    tracker.RecordHeartbeat(req.SessionId);
     return Results.Created($"/api/sessions/{req.SessionId}", new
     {
         sessionId = req.SessionId,
@@ -83,7 +85,7 @@ api.MapPost("/sessions", (CreateSessionRequest req, HistoryRepository repo) =>
     });
 });
 
-api.MapPut("/sessions/{sessionId}", (string sessionId, RenameSessionRequest req, HistoryRepository repo) =>
+api.MapPut("/sessions/{sessionId}", (string sessionId, RenameSessionRequest req, HistoryRepository repo, ActiveSessionTracker tracker) =>
 {
     if (string.IsNullOrWhiteSpace(req.Name))
     {
@@ -91,6 +93,7 @@ api.MapPut("/sessions/{sessionId}", (string sessionId, RenameSessionRequest req,
     }
 
     var updated = repo.RenameSession(sessionId, req.Name, req.Repo);
+    tracker.RecordHeartbeat(sessionId);
     return updated ? Results.Ok(new { sessionId, name = req.Name }) : Results.NotFound(new { error = "Session not found" });
 });
 
@@ -103,7 +106,7 @@ api.MapDelete("/sessions/{sessionId}", (string sessionId, HistoryRepository repo
 api.MapGet("/sessions/{sessionId}/conversations", (string sessionId, HistoryRepository repo) =>
     Results.Ok(repo.GetConversations(sessionId)));
 
-api.MapPost("/conversations", (CreateConversationRequest req, HistoryRepository repo) =>
+api.MapPost("/conversations", (CreateConversationRequest req, HistoryRepository repo, ActiveSessionTracker tracker) =>
 {
     if (string.IsNullOrWhiteSpace(req.SessionId))
     {
@@ -116,8 +119,40 @@ api.MapPost("/conversations", (CreateConversationRequest req, HistoryRepository 
         req.ResponseMd ?? string.Empty,
         req.Repo,
         req.SessionName);
+    tracker.RecordHeartbeat(req.SessionId);
 
     return Results.Created($"/api/sessions/{req.SessionId}/conversations/{record.Id}", record);
+});
+
+api.MapGet("/active-sessions", (ActiveSessionTracker tracker) =>
+    Results.Ok(tracker.GetActiveSessionIds()));
+
+api.MapPost("/sessions/{sessionId}/heartbeat", (string sessionId, ActiveSessionTracker tracker) =>
+{
+    tracker.RecordHeartbeat(sessionId);
+    var items = tracker.DequeuePendingFeedback(sessionId);
+    return Results.Ok(new { sessionId, items });
+});
+
+api.MapGet("/sessions/{sessionId}/feedback/pending", (string sessionId, ActiveSessionTracker tracker) =>
+{
+    var items = tracker.DequeuePendingFeedback(sessionId);
+    return Results.Ok(new { sessionId, items });
+});
+
+api.MapPost("/sessions/{sessionId}/feedback", (string sessionId, CreateFeedbackRequest req, ActiveSessionTracker tracker) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Comment))
+    {
+        return Results.BadRequest(new { error = "comment is required" });
+    }
+
+    var item = tracker.EnqueueFeedback(sessionId, req.Comment, req.QuotedText, req.ConversationId);
+    return Results.Accepted($"/api/sessions/{sessionId}/feedback/{item.Id}", new
+    {
+        item,
+        isSessionActive = tracker.IsSessionActive(sessionId)
+    });
 });
 
 app.MapStaticAssets();

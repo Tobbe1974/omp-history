@@ -4,6 +4,7 @@
 @using Markdig
 @inject HistoryRepository Repository
 @inject HistoryNotifier Notifier
+@inject ActiveSessionTracker SessionTracker
 @inject IJSRuntime JS
 
 <PageTitle>OMP History</PageTitle>
@@ -80,10 +81,20 @@
                     @foreach (var session in _sessions)
                     {
                         var isSelected = string.Equals(session.SessionId, _selectedSessionId, StringComparison.Ordinal);
-                        <div class="list-card session-card @(isSelected ? "selected" : "")"
+                        var isActiveSession = SessionTracker.IsSessionActive(session.SessionId);
+                        <div class="list-card session-card @(isSelected ? "selected" : "") @(isActiveSession ? "active-omp-session" : "")"
                              @onclick="() => SelectSession(session.SessionId)">
                             <div class="session-card-main">
-                                <div class="session-title" title="@session.Name">@session.Name</div>
+                                <div class="session-title-row">
+                                    <div class="session-title" title="@session.Name">@session.Name</div>
+                                    @if (isActiveSession)
+                                    {
+                                        <span class="session-active-badge" title="Active in OMP terminal">
+                                            <span class="session-active-dot"></span>
+                                            ACTIVE
+                                        </span>
+                                    }
+                                </div>
                                 <div class="session-id" title="@session.SessionId">@session.SessionId</div>
                                 <div class="session-meta">
                                     <span>@session.ConversationCount @(session.ConversationCount == 1 ? "turn" : "turns")</span>
@@ -226,7 +237,9 @@
             }
             else
             {
-                <div class="detail-scroll">
+                <div class="detail-scroll"
+                     @oncontextmenu="HandleDetailContextMenuAsync"
+                     @oncontextmenu:preventDefault="true">
                     <section class="detail-section prompt-section">
                         <div class="section-label">
                             <span>USER QUESTION / TASK</span>
@@ -237,13 +250,105 @@
 
                     <section class="detail-section response-section">
                         <div class="section-label">
-                            <span>MODEL RESPONSE</span>
+                            <div class="section-label-left">
+                                <span>MODEL RESPONSE</span>
+                                <span class="response-context-hint">Select text &amp; right-click to comment</span>
+                            </div>
+                            @if (!string.IsNullOrEmpty(_feedbackStatusMessage))
+                            {
+                                <span class="feedback-status-pill">@_feedbackStatusMessage</span>
+                            }
                         </div>
                         <div class="markdown-body" @key="SelectedConversation.Id">
                             @((MarkupString)RenderMarkdown(SelectedConversation.ResponseMd))
                         </div>
                     </section>
                 </div>
+
+                @if (_isFeedbackOpen)
+                {
+                    <div class="word-comment-backdrop" @onclick="CloseFeedbackCard">
+                        <div class="word-comment-card"
+                             style="top: @(_feedbackTopPx)px;"
+                             role="dialog"
+                             aria-label="Feedback Comment"
+                             @onclick:stopPropagation="true"
+                             @oncontextmenu:stopPropagation="true">
+                            <div class="word-comment-accent"></div>
+                            <div class="word-comment-content">
+                                <div class="word-comment-header">
+                                    <div class="word-comment-author">
+                                        <span class="word-comment-avatar">F</span>
+                                        <div class="word-comment-author-meta">
+                                            <span class="word-comment-author-name">Feedback to OMP</span>
+                                            <span class="word-comment-timestamp">Just now</span>
+                                        </div>
+                                    </div>
+                                    <button type="button"
+                                            class="word-comment-close"
+                                            title="Discard comment"
+                                            aria-label="Close comment"
+                                            @onclick="CloseFeedbackCard">×</button>
+                                </div>
+
+                                @if (!IsSelectedSessionActive)
+                                {
+                                    <div class="word-comment-warning" role="alert">
+                                        <strong>Warning:</strong> This session is not the active OMP session.
+                                        @if (ActiveSessionInRepo is not null)
+                                        {
+                                            <span>The active session is <strong>@ActiveSessionInRepo.Name</strong>.</span>
+                                        }
+                                        else
+                                        {
+                                            <span>No active OMP session detected for this repo.</span>
+                                        }
+                                    </div>
+                                }
+
+                                @if (!string.IsNullOrWhiteSpace(_feedbackQuotedText))
+                                {
+                                    <div class="word-comment-quote">
+                                        <div class="word-comment-quote-header">
+                                            <span>Quoted from response</span>
+                                            <button type="button"
+                                                    class="word-comment-quote-clear"
+                                                    title="Remove quote"
+                                                    @onclick="ClearFeedbackQuote">×</button>
+                                        </div>
+                                        <blockquote>@_feedbackQuotedText</blockquote>
+                                    </div>
+                                }
+
+                                <textarea id="word-comment-textarea"
+                                          class="word-comment-textarea"
+                                          rows="3"
+                                          placeholder="Add a comment or reply to OMP… (Ctrl+Enter to send)"
+                                          @bind="_feedbackComment"
+                                          @bind:event="oninput"
+                                          @onkeydown="HandleFeedbackKeyDown"></textarea>
+
+                                <div class="word-comment-footer">
+                                    <button type="button"
+                                            class="word-comment-btn word-comment-btn-cancel"
+                                            @onclick="CloseFeedbackCard">
+                                        Cancel
+                                    </button>
+                                    <button type="button"
+                                            class="word-comment-btn word-comment-btn-post"
+                                            disabled="@string.IsNullOrWhiteSpace(_feedbackComment)"
+                                            title="Post comment to OMP (Ctrl+Enter)"
+                                            @onclick="SubmitFeedback">
+                                        <span>Post</span>
+                                        <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
+                                            <path d="M1.5 1.5L14.5 8L1.5 14.5L3.5 8L1.5 1.5ZM4.8 8.7L3.2 12.6L12.1 8L3.2 3.4L4.8 7.3H9.5V8.7H4.8Z" />
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                }
             }
         </main>
     </div>
@@ -341,6 +446,17 @@
     private SessionRecord? _sessionToDelete;
     private bool _isPanesPinned = true;
 
+    private bool _isFeedbackOpen;
+    private string _feedbackComment = string.Empty;
+    private string? _feedbackQuotedText;
+    private int _feedbackTopPx = 140;
+    private string? _feedbackStatusMessage;
+    private System.Threading.Timer? _activeStatusTimer;
+
+    private bool IsSelectedSessionActive => SessionTracker.IsSessionActive(_selectedSessionId);
+
+    private SessionRecord? ActiveSessionInRepo =>
+        _sessions.FirstOrDefault(s => SessionTracker.IsSessionActive(s.SessionId));
     private bool HasActiveFilter => !string.IsNullOrWhiteSpace(_appliedFilter);
 
     private IReadOnlyList<IndexedConversation> FilteredConversations
@@ -376,6 +492,10 @@
         Notifier.OnConversationAdded += HandleConversationAdded;
         Notifier.OnChanged += HandleHistoryChanged;
         RefreshState();
+        _activeStatusTimer = new System.Threading.Timer(_ =>
+        {
+            _ = InvokeAsync(StateHasChanged);
+        }, null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
     }
 
     private void HandleConversationAdded(ConversationAddedEvent evt)
@@ -590,6 +710,75 @@
         }
     }
 
+    private async Task HandleDetailContextMenuAsync(MouseEventArgs e)
+    {
+        if (SelectedConversation is null || string.IsNullOrEmpty(_selectedSessionId))
+        {
+            return;
+        }
+
+        string selectedText = string.Empty;
+        try
+        {
+            selectedText = await JS.InvokeAsync<string>("ompHistoryCaptureSelection");
+        }
+        catch
+        {
+            // ignore JS interop failures
+        }
+
+        _feedbackQuotedText = string.IsNullOrWhiteSpace(selectedText) ? null : selectedText.Trim();
+        _feedbackTopPx = (int)Math.Clamp(e.ClientY - 24, 68, 520);
+        _isFeedbackOpen = true;
+        _feedbackStatusMessage = null;
+    }
+
+    private void ClearFeedbackQuote()
+    {
+        _feedbackQuotedText = null;
+    }
+
+    private void CloseFeedbackCard()
+    {
+        _isFeedbackOpen = false;
+        _feedbackComment = string.Empty;
+        _feedbackQuotedText = null;
+    }
+
+    private void HandleFeedbackKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && (e.CtrlKey || e.MetaKey))
+        {
+            SubmitFeedback();
+        }
+        else if (e.Key == "Escape")
+        {
+            CloseFeedbackCard();
+        }
+    }
+
+    private void SubmitFeedback()
+    {
+        if (string.IsNullOrWhiteSpace(_selectedSessionId) || string.IsNullOrWhiteSpace(_feedbackComment))
+        {
+            return;
+        }
+
+        var isActive = IsSelectedSessionActive;
+        SessionTracker.EnqueueFeedback(
+            _selectedSessionId,
+            _feedbackComment,
+            _feedbackQuotedText,
+            SelectedConversation?.Id);
+
+        _isFeedbackOpen = false;
+        _feedbackComment = string.Empty;
+        _feedbackQuotedText = null;
+        _feedbackStatusMessage = isActive
+            ? "Feedback sent to active OMP session"
+            : "Feedback queued (will deliver when session becomes active)";
+    }
+
     private void RequestDeleteSession(SessionRecord session)
     {
         _sessionToDelete = session;
@@ -666,5 +855,6 @@
     {
         Notifier.OnConversationAdded -= HandleConversationAdded;
         Notifier.OnChanged -= HandleHistoryChanged;
+        _activeStatusTimer?.Dispose();
     }
 }

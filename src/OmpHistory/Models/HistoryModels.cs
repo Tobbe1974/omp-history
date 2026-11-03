@@ -35,3 +35,21 @@ public sealed record CreateConversationRequest(
     string ResponseMd,
     string? Repo = null,
     string? SessionName = null);
+
+public sealed record FeedbackItem(
+    string Id,
+    string SessionId,
+    long? ConversationId,
+    string? QuotedText,
+    string Comment,
+    string FormattedMessage,
+    string CreatedAt);
+
+public sealed record CreateFeedbackRequest(
+    string Comment,
+    string? QuotedText = null,
+    long? ConversationId = null);
+
+public sealed record ActiveSessionHeartbeatRequest(
+    string? Repo = null,
+    string? Name = null);

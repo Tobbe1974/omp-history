@@ -82,6 +82,18 @@
                 }
             }
         };
+
+        window.ompHistoryCaptureSelection = function () {
+            const sel = window.getSelection();
+            const text = sel ? sel.toString().trim() : '';
+            setTimeout(() => {
+                const textarea = document.getElementById('word-comment-textarea');
+                if (textarea) {
+                    textarea.focus();
+                }
+            }, 50);
+            return text;
+        };
     </script>
     <script src="@Assets["_framework/blazor.web.js"]"></script>
 </body>

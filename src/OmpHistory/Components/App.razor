@@ -8,6 +8,7 @@
     <ResourcePreloader />
     <link rel="stylesheet" href="@Assets["lib/bootstrap/dist/css/bootstrap.min.css"]" />
     <link rel="stylesheet" href="@Assets["lib/katex/katex.min.css"]" />
+    <link rel="stylesheet" href="@Assets["lib/diff2html/diff2html.min.css"]" />
     <link rel="stylesheet" href="@Assets["app.css"]" />
     <link rel="stylesheet" href="@Assets["OmpHistory.styles.css"]" />
     <ImportMap />
@@ -21,6 +22,7 @@
     <script src="@Assets["lib/mermaid.min.js"]"></script>
     <script src="@Assets["lib/katex/katex.min.js"]"></script>
     <script src="@Assets["lib/katex/auto-render.min.js"]"></script>
+    <script src="@Assets["lib/diff2html/diff2html.min.js"]"></script>
     <script>
         window.ompHistoryRenderMermaid = async function () {
             if (!window.mermaid) return;
@@ -81,6 +83,30 @@
                     console.error('KaTeX render error:', err);
                 }
             }
+
+            if (window.Diff2Html) {
+                const diffBlocks = document.querySelectorAll('.markdown-body pre > code.language-diff, .markdown-body pre > code.language-patch');
+                diffBlocks.forEach((codeEl) => {
+                    const pre = codeEl.parentElement;
+                    if (!pre || pre.getAttribute('data-diff-rendered')) return;
+                    const raw = codeEl.textContent || '';
+                    if (!raw.includes('@@') && !raw.includes('diff --git') && !raw.includes('--- ')) return;
+                    try {
+                        const html = window.Diff2Html.html(raw, {
+                            drawFileList: false,
+                            matching: 'lines',
+                            outputFormat: 'line-by-line',
+                            colorScheme: 'dark'
+                        });
+                        const wrapper = document.createElement('div');
+                        wrapper.className = 'omp-diff2html-wrapper omp-markdown-diff';
+                        wrapper.innerHTML = html;
+                        pre.replaceWith(wrapper);
+                    } catch (err) {
+                        console.error('Markdown diff2html render error:', err);
+                    }
+                });
+            }
         };
 
         window.ompHistoryCaptureSelection = function () {
@@ -93,6 +119,31 @@
                 }
             }, 50);
             return text;
+        };
+
+        window.ompHistoryRenderGitDiff = function (elementId, rawDiff, outputFormat, drawFileList) {
+            const container = document.getElementById(elementId);
+            if (!container) return;
+            if (!rawDiff || !rawDiff.trim()) {
+                container.innerHTML = '';
+                return;
+            }
+            if (!window.Diff2Html) {
+                container.textContent = rawDiff;
+                return;
+            }
+            try {
+                const html = window.Diff2Html.html(rawDiff, {
+                    drawFileList: drawFileList !== false,
+                    matching: 'lines',
+                    outputFormat: outputFormat === 'side-by-side' ? 'side-by-side' : 'line-by-line',
+                    colorScheme: 'dark'
+                });
+                container.innerHTML = html;
+            } catch (err) {
+                console.error('Diff2Html render error:', err);
+                container.textContent = rawDiff;
+            }
         };
     </script>
     <script src="@Assets["_framework/blazor.web.js"]"></script>

@@ -38,6 +38,7 @@ builder.Services.AddSingleton<HistoryRepository>(sp =>
     }
     return new HistoryRepository(dbPath, notifier);
 });
+builder.Services.AddSingleton<GitCompareService>();
 
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
@@ -75,7 +76,7 @@ api.MapPost("/sessions", (CreateSessionRequest req, HistoryRepository repo, Acti
         return Results.BadRequest(new { error = "sessionId is required" });
     }
 
-    repo.UpsertSession(req.SessionId, req.Repo, req.Name);
+    repo.UpsertSession(req.SessionId, req.Repo, req.Name, req.RepoPath);
     tracker.RecordHeartbeat(req.SessionId);
     return Results.Created($"/api/sessions/{req.SessionId}", new
     {
@@ -92,7 +93,7 @@ api.MapPut("/sessions/{sessionId}", (string sessionId, RenameSessionRequest req,
         return Results.BadRequest(new { error = "name is required" });
     }
 
-    var updated = repo.RenameSession(sessionId, req.Name, req.Repo);
+    var updated = repo.RenameSession(sessionId, req.Name, req.Repo, req.RepoPath);
     tracker.RecordHeartbeat(sessionId);
     return updated ? Results.Ok(new { sessionId, name = req.Name }) : Results.NotFound(new { error = "Session not found" });
 });
@@ -118,7 +119,8 @@ api.MapPost("/conversations", (CreateConversationRequest req, HistoryRepository 
         req.Prompt ?? string.Empty,
         req.ResponseMd ?? string.Empty,
         req.Repo,
-        req.SessionName);
+        req.SessionName,
+        req.RepoPath);
     tracker.RecordHeartbeat(req.SessionId);
 
     return Results.Created($"/api/sessions/{req.SessionId}/conversations/{record.Id}", record);
@@ -127,8 +129,24 @@ api.MapPost("/conversations", (CreateConversationRequest req, HistoryRepository 
 api.MapGet("/active-sessions", (ActiveSessionTracker tracker) =>
     Results.Ok(tracker.GetActiveSessionIds()));
 
-api.MapPost("/sessions/{sessionId}/heartbeat", (string sessionId, ActiveSessionTracker tracker) =>
+api.MapPost("/sessions/{sessionId}/heartbeat", async (string sessionId, HttpRequest httpRequest, HistoryRepository repo, ActiveSessionTracker tracker) =>
 {
+    if (httpRequest.ContentLength is > 0)
+    {
+        try
+        {
+            var hb = await httpRequest.ReadFromJsonAsync<ActiveSessionHeartbeatRequest>();
+            if (!string.IsNullOrWhiteSpace(hb?.RepoPath))
+            {
+                repo.UpdateSessionRepoPath(sessionId, hb.RepoPath);
+            }
+        }
+        catch
+        {
+            // ignore optional heartbeat body parse errors
+        }
+    }
+
     tracker.RecordHeartbeat(sessionId);
     var items = tracker.DequeuePendingFeedback(sessionId);
     return Results.Ok(new { sessionId, items });
@@ -154,6 +172,19 @@ api.MapPost("/sessions/{sessionId}/feedback", (string sessionId, CreateFeedbackR
         isSessionActive = tracker.IsSessionActive(sessionId)
     });
 });
+
+api.MapGet("/repos/{repoName}/git/overview", (string repoName, string? repoPath, GitCompareService gitService) =>
+    Results.Ok(gitService.GetRepoOverview(repoName, repoPath)));
+
+api.MapGet("/repos/{repoName}/git/diff", (
+    string repoName,
+    string? mode,
+    string? baseRef,
+    string? targetRef,
+    string? fileFilter,
+    string? repoPath,
+    GitCompareService gitService) =>
+    Results.Ok(gitService.GetDiff(repoName, mode ?? "working", baseRef, targetRef, fileFilter, repoPath)));
 
 app.MapStaticAssets();
 app.MapRazorComponents<App>()

@@ -3,7 +3,8 @@ namespace OmpHistory.Models;
 public sealed record RepoSummary(
     string Repo,
     int SessionCount,
-    string LastUpdatedAt);
+    string LastUpdatedAt,
+    string? RepoPath = null);
 
 public sealed record SessionRecord(
     string SessionId,
@@ -23,19 +24,21 @@ public sealed record ConversationRecord(
 public sealed record CreateSessionRequest(
     string SessionId,
     string Repo,
-    string Name);
+    string Name,
+    string? RepoPath = null);
 
 public sealed record RenameSessionRequest(
     string Name,
-    string? Repo = null);
+    string? Repo = null,
+    string? RepoPath = null);
 
 public sealed record CreateConversationRequest(
     string SessionId,
     string Prompt,
     string ResponseMd,
     string? Repo = null,
-    string? SessionName = null);
-
+    string? SessionName = null,
+    string? RepoPath = null);
 public sealed record FeedbackItem(
     string Id,
     string SessionId,
@@ -52,4 +55,39 @@ public sealed record CreateFeedbackRequest(
 
 public sealed record ActiveSessionHeartbeatRequest(
     string? Repo = null,
-    string? Name = null);
+    string? Name = null,
+    string? RepoPath = null);
+
+public sealed record GitCommitInfo(
+    string Hash,
+    string ShortHash,
+    string Subject,
+    string Author,
+    string RelativeDate);
+
+public sealed record GitFileChange(
+    string Status,
+    string Path,
+    int Additions,
+    int Deletions);
+
+public sealed record GitRepoOverview(
+    bool IsAvailable,
+    string? RepoPath,
+    string? CurrentBranch,
+    string? HeadCommit,
+    int UncommittedFileCount,
+    IReadOnlyList<string> Branches,
+    IReadOnlyList<GitCommitInfo> RecentCommits,
+    string? Error = null);
+
+public sealed record GitDiffResult(
+    bool IsAvailable,
+    string Mode,
+    string Title,
+    string? RepoPath,
+    string RawDiff,
+    int TotalAdditions,
+    int TotalDeletions,
+    IReadOnlyList<GitFileChange> ChangedFiles,
+    string? Error = null);

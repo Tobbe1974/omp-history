@@ -47,7 +47,8 @@ public sealed class HistoryRepository
                 repo TEXT NOT NULL,
                 name TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                repo_path TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_sessions_repo ON sessions(repo);
@@ -64,54 +65,90 @@ public sealed class HistoryRepository
             CREATE INDEX IF NOT EXISTS idx_conversations_session_id ON conversations(session_id);
             """;
         cmd.ExecuteNonQuery();
+
+        try
+        {
+            using var alterCmd = conn.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE sessions ADD COLUMN repo_path TEXT;";
+            alterCmd.ExecuteNonQuery();
+        }
+        catch
+        {
+            // Column already exists
+        }
     }
 
-    public void UpsertSession(string sessionId, string repo, string name)
+    public void UpsertSession(string sessionId, string repo, string name, string? repoPath = null)
     {
         var now = DateTime.UtcNow.ToString("O");
         var normalizedRepo = string.IsNullOrWhiteSpace(repo) ? "unknown" : repo.Trim();
         var normalizedName = string.IsNullOrWhiteSpace(name) ? sessionId[..Math.Min(8, sessionId.Length)] : name.Trim();
+        var normalizedRepoPath = string.IsNullOrWhiteSpace(repoPath) ? null : repoPath.Trim();
 
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO sessions (session_id, repo, name, created_at, updated_at)
-            VALUES ($sessionId, $repo, $name, $now, $now)
+            INSERT INTO sessions (session_id, repo, name, created_at, updated_at, repo_path)
+            VALUES ($sessionId, $repo, $name, $now, $now, $repoPath)
             ON CONFLICT(session_id) DO UPDATE SET
                 repo = CASE WHEN excluded.repo <> 'unknown' THEN excluded.repo ELSE sessions.repo END,
                 name = excluded.name,
-                updated_at = excluded.updated_at;
+                updated_at = excluded.updated_at,
+                repo_path = COALESCE(excluded.repo_path, sessions.repo_path);
             """;
         cmd.Parameters.AddWithValue("$sessionId", sessionId);
         cmd.Parameters.AddWithValue("$repo", normalizedRepo);
         cmd.Parameters.AddWithValue("$name", normalizedName);
         cmd.Parameters.AddWithValue("$now", now);
+        cmd.Parameters.AddWithValue("$repoPath", (object?)normalizedRepoPath ?? DBNull.Value);
         cmd.ExecuteNonQuery();
 
         _notifier.NotifyChanged();
     }
 
-    public bool RenameSession(string sessionId, string name, string? repo = null)
+    public void UpdateSessionRepoPath(string sessionId, string? repoPath)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId) || string.IsNullOrWhiteSpace(repoPath))
+        {
+            return;
+        }
+
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE sessions
+            SET repo_path = $repoPath
+            WHERE session_id = $sessionId AND (repo_path IS NULL OR repo_path <> $repoPath);
+            """;
+        cmd.Parameters.AddWithValue("$sessionId", sessionId.Trim());
+        cmd.Parameters.AddWithValue("$repoPath", repoPath.Trim());
+        cmd.ExecuteNonQuery();
+    }
+
+    public bool RenameSession(string sessionId, string name, string? repo = null, string? repoPath = null)
     {
         var now = DateTime.UtcNow.ToString("O");
         var normalizedName = name.Trim();
+        var normalizedRepoPath = string.IsNullOrWhiteSpace(repoPath) ? null : repoPath.Trim();
 
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             UPDATE sessions
             SET name = $name,
-                updated_at = $now
+                updated_at = $now,
+                repo_path = COALESCE($repoPath, repo_path)
             WHERE session_id = $sessionId;
             """;
         cmd.Parameters.AddWithValue("$sessionId", sessionId);
         cmd.Parameters.AddWithValue("$name", normalizedName);
         cmd.Parameters.AddWithValue("$now", now);
+        cmd.Parameters.AddWithValue("$repoPath", (object?)normalizedRepoPath ?? DBNull.Value);
 
         var rows = cmd.ExecuteNonQuery();
         if (rows == 0 && !string.IsNullOrWhiteSpace(repo))
         {
-            UpsertSession(sessionId, repo, normalizedName);
+            UpsertSession(sessionId, repo, normalizedName, normalizedRepoPath);
             return true;
         }
 
@@ -139,9 +176,10 @@ public sealed class HistoryRepository
         return false;
     }
 
-    public ConversationRecord AddConversation(string sessionId, string prompt, string responseMd, string? repo = null, string? sessionName = null)
+    public ConversationRecord AddConversation(string sessionId, string prompt, string responseMd, string? repo = null, string? sessionName = null, string? repoPath = null)
     {
         var now = DateTime.UtcNow.ToString("O");
+        var normalizedRepoPath = string.IsNullOrWhiteSpace(repoPath) ? null : repoPath.Trim();
         using var conn = OpenConnection();
         using var tx = conn.BeginTransaction();
 
@@ -154,18 +192,20 @@ public sealed class HistoryRepository
                 : FirstLinePreview(prompt, 60);
 
             ensureCmd.CommandText = """
-                INSERT INTO sessions (session_id, repo, name, created_at, updated_at)
-                VALUES ($sessionId, $repo, $name, $now, $now)
+                INSERT INTO sessions (session_id, repo, name, created_at, updated_at, repo_path)
+                VALUES ($sessionId, $repo, $name, $now, $now, $repoPath)
                 ON CONFLICT(session_id) DO UPDATE SET
                     updated_at = $now,
                     repo = CASE WHEN sessions.repo = 'unknown' AND $repo <> 'unknown' THEN $repo ELSE sessions.repo END,
-                    name = CASE WHEN $hasExplicitName = 1 THEN $name ELSE sessions.name END;
+                    name = CASE WHEN $hasExplicitName = 1 THEN $name ELSE sessions.name END,
+                    repo_path = COALESCE(excluded.repo_path, sessions.repo_path);
                 """;
             ensureCmd.Parameters.AddWithValue("$sessionId", sessionId);
             ensureCmd.Parameters.AddWithValue("$repo", fallbackRepo);
             ensureCmd.Parameters.AddWithValue("$name", fallbackName);
             ensureCmd.Parameters.AddWithValue("$hasExplicitName", !string.IsNullOrWhiteSpace(sessionName) ? 1 : 0);
             ensureCmd.Parameters.AddWithValue("$now", now);
+            ensureCmd.Parameters.AddWithValue("$repoPath", (object?)normalizedRepoPath ?? DBNull.Value);
             ensureCmd.ExecuteNonQuery();
         }
 
@@ -208,7 +248,10 @@ public sealed class HistoryRepository
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT repo, COUNT(*) AS session_count, MAX(updated_at) AS last_updated
+            SELECT repo,
+                   COUNT(*) AS session_count,
+                   MAX(updated_at) AS last_updated,
+                   MAX(repo_path) AS repo_path
             FROM sessions
             GROUP BY repo
             ORDER BY last_updated DESC, repo ASC;
@@ -221,9 +264,30 @@ public sealed class HistoryRepository
             list.Add(new RepoSummary(
                 reader.GetString(0),
                 reader.GetInt32(1),
-                reader.GetString(2)));
+                reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
         }
         return list;
+    }
+
+    public string? GetRepoPath(string repo)
+    {
+        if (string.IsNullOrWhiteSpace(repo))
+        {
+            return null;
+        }
+
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT repo_path
+            FROM sessions
+            WHERE repo = $repo AND repo_path IS NOT NULL AND TRIM(repo_path) <> ''
+            ORDER BY updated_at DESC
+            LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("$repo", repo.Trim());
+        return cmd.ExecuteScalar() as string;
     }
 
     public IReadOnlyList<SessionRecord> GetSessionsByRepo(string repo)

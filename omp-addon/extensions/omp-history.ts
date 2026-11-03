@@ -174,6 +174,24 @@ function findGitConfigPath(startDir: string): string | undefined {
   return undefined;
 }
 
+export function resolveRepoRootPath(cwd: string): string {
+  try {
+    const gitConfigPath = findGitConfigPath(cwd);
+    if (gitConfigPath) {
+      const normalized = path.resolve(gitConfigPath);
+      const dotGitSegment = `${path.sep}.git${path.sep}`;
+      const idx = normalized.indexOf(dotGitSegment);
+      if (idx > 0) {
+        return normalized.slice(0, idx);
+      }
+      return path.dirname(path.dirname(normalized));
+    }
+  } catch {
+    // fallback to resolved cwd
+  }
+  return path.resolve(cwd);
+}
+
 export function resolveRepoName(cwd: string): string {
   try {
     const gitConfigPath = findGitConfigPath(cwd);
@@ -468,7 +486,9 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     const sessionId = readSessionId(ctx);
     if (!sessionId) return;
 
-    const repo = resolveRepoName(ctx?.cwd || process.cwd());
+    const effectiveCwd = ctx?.cwd || process.cwd();
+    const repo = resolveRepoName(effectiveCwd);
+    const repoPath = resolveRepoRootPath(effectiveCwd);
     const name = readSessionName(ctx);
 
     activeSessionId = sessionId;
@@ -478,6 +498,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     await requestWithRetryPrompt(ctx, "POST", "/api/sessions", {
       sessionId,
       repo,
+      repoPath,
       name,
     });
   }
@@ -498,9 +519,11 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     if (currentName && currentName !== lastKnownSessionName) {
       lastKnownSessionName = currentName;
       lastKnownRepo = currentRepo;
+      const repoPath = resolveRepoRootPath(ctx?.cwd || process.cwd());
       await requestWithRetryPrompt(ctx, "PUT", `/api/sessions/${encodeURIComponent(sessionId)}`, {
         name: currentName,
         repo: currentRepo,
+        repoPath,
       });
     }
   }
@@ -512,9 +535,14 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     if (!sessionId) return;
 
     const baseUrl = resolveBaseUrl();
+    const effectiveCwd = ctx?.cwd || process.cwd();
+    const repo = resolveRepoName(effectiveCwd);
+    const repoPath = resolveRepoRootPath(effectiveCwd);
     try {
       const res = await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/heartbeat`, {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo, repoPath }),
         signal: AbortSignal.timeout(2500),
       });
       if (!res.ok) return;
@@ -574,10 +602,13 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
       const sessionId = readSessionId(ctx);
       if (sessionId) {
         lastKnownSessionName = newName;
-        const repo = resolveRepoName(ctx?.cwd || process.cwd());
+        const effectiveCwd = ctx?.cwd || process.cwd();
+        const repo = resolveRepoName(effectiveCwd);
+        const repoPath = resolveRepoRootPath(effectiveCwd);
         void requestWithRetryPrompt(ctx, "PUT", `/api/sessions/${encodeURIComponent(sessionId)}`, {
           name: newName,
           repo,
+          repoPath,
         });
       }
       return;
@@ -635,13 +666,16 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
     promptInFlight = false;
 
-    const repo = lastKnownRepo ?? resolveRepoName(ctx?.cwd || process.cwd());
+    const effectiveCwd = ctx?.cwd || process.cwd();
+    const repo = lastKnownRepo ?? resolveRepoName(effectiveCwd);
+    const repoPath = resolveRepoRootPath(effectiveCwd);
     const sessionName = readSessionName(ctx);
     lastKnownSessionName = sessionName;
 
     await requestWithRetryPrompt(ctx, "POST", "/api/conversations", {
       sessionId,
       repo,
+      repoPath,
       sessionName,
       prompt,
       responseMd,

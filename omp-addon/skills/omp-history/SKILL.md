@@ -18,8 +18,9 @@ alwaysApply: true
 2. **Session Rename**:
    - When a session is renamed (via `/rename` or title changes), sends `PUT /api/sessions/{sessionId}` with `{ name, repo }`.
 
-3. **Conversation Turn Logging**:
-   - After a user question/task is answered (`agent_end`), posts `{ sessionId, repo, sessionName, prompt, responseMd }` to `POST /api/conversations`.
+3. **Conversation Turn & File Diff Logging**:
+   - Snapshots the Git working tree before (`before_agent_start`) and after (`agent_end`) each turn using a temporary `GIT_INDEX_FILE` (`git add -A && git write-tree`) so the real `.git/index` and commit history remain untouched.
+   - Posts `{ sessionId, repo, repoPath, sessionName, prompt, responseMd, diffPatch, gitTreeBefore, gitTreeAfter }` to `POST /api/conversations`.
    - Includes **only the final Markdown response** (`type === "text"` blocks) and excludes all model thinking blocks (`thinking`) and intermediate tool outputs.
 
 4. **Error Handling (`Start server / Retry / Disable`)**:
@@ -35,7 +36,7 @@ alwaysApply: true
   - Body: `{ "name": "<new-name>", "repo": "<repo>" }`
 - `DELETE http://localhost:5180/api/sessions/{sessionId}`
 - `POST http://localhost:5180/api/conversations`
-  - Body: `{ "sessionId": "<id>", "repo": "<repo>", "sessionName": "<name>", "prompt": "<user-question>", "responseMd": "<final-markdown-reply>" }`
+  - Body: `{ "sessionId": "<id>", "repo": "<repo>", "repoPath": "<path>", "sessionName": "<name>", "prompt": "<user-question>", "responseMd": "<final-markdown-reply>", "diffPatch": "<unified-diff>", "gitTreeBefore": "<sha>", "gitTreeAfter": "<sha>" }`
 - `GET http://localhost:5180/api/repos`
 - `GET http://localhost:5180/api/repos/{repo}/sessions`
 - `GET http://localhost:5180/api/sessions/{sessionId}/conversations`

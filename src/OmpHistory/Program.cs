@@ -120,7 +120,10 @@ api.MapPost("/conversations", (CreateConversationRequest req, HistoryRepository 
         req.ResponseMd ?? string.Empty,
         req.Repo,
         req.SessionName,
-        req.RepoPath);
+        req.RepoPath,
+        req.DiffPatch,
+        req.GitTreeBefore,
+        req.GitTreeAfter);
     tracker.RecordHeartbeat(req.SessionId);
 
     return Results.Created($"/api/sessions/{req.SessionId}/conversations/{record.Id}", record);

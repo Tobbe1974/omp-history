@@ -59,6 +59,9 @@ public sealed class HistoryRepository
                 prompt TEXT NOT NULL,
                 response_md TEXT NOT NULL,
                 created_at TEXT NOT NULL,
+                diff_patch TEXT,
+                git_tree_before TEXT,
+                git_tree_after TEXT,
                 FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
             );
 
@@ -75,6 +78,25 @@ public sealed class HistoryRepository
         catch
         {
             // Column already exists
+        }
+
+        foreach (var alterSql in new[]
+        {
+            "ALTER TABLE conversations ADD COLUMN diff_patch TEXT;",
+            "ALTER TABLE conversations ADD COLUMN git_tree_before TEXT;",
+            "ALTER TABLE conversations ADD COLUMN git_tree_after TEXT;"
+        })
+        {
+            try
+            {
+                using var alterCmd = conn.CreateCommand();
+                alterCmd.CommandText = alterSql;
+                alterCmd.ExecuteNonQuery();
+            }
+            catch
+            {
+                // Column already exists
+            }
         }
     }
 
@@ -176,10 +198,22 @@ public sealed class HistoryRepository
         return false;
     }
 
-    public ConversationRecord AddConversation(string sessionId, string prompt, string responseMd, string? repo = null, string? sessionName = null, string? repoPath = null)
+    public ConversationRecord AddConversation(
+        string sessionId,
+        string prompt,
+        string responseMd,
+        string? repo = null,
+        string? sessionName = null,
+        string? repoPath = null,
+        string? diffPatch = null,
+        string? gitTreeBefore = null,
+        string? gitTreeAfter = null)
     {
         var now = DateTime.UtcNow.ToString("O");
         var normalizedRepoPath = string.IsNullOrWhiteSpace(repoPath) ? null : repoPath.Trim();
+        var normalizedDiffPatch = string.IsNullOrWhiteSpace(diffPatch) ? null : diffPatch;
+        var normalizedTreeBefore = string.IsNullOrWhiteSpace(gitTreeBefore) ? null : gitTreeBefore.Trim();
+        var normalizedTreeAfter = string.IsNullOrWhiteSpace(gitTreeAfter) ? null : gitTreeAfter.Trim();
         using var conn = OpenConnection();
         using var tx = conn.BeginTransaction();
 
@@ -226,21 +260,32 @@ public sealed class HistoryRepository
         {
             insertCmd.Transaction = tx;
             insertCmd.CommandText = """
-                INSERT INTO conversations (session_id, prompt, response_md, created_at)
-                VALUES ($sessionId, $prompt, $responseMd, $now);
+                INSERT INTO conversations (session_id, prompt, response_md, created_at, diff_patch, git_tree_before, git_tree_after)
+                VALUES ($sessionId, $prompt, $responseMd, $now, $diffPatch, $gitTreeBefore, $gitTreeAfter);
                 SELECT last_insert_rowid();
                 """;
             insertCmd.Parameters.AddWithValue("$sessionId", sessionId);
             insertCmd.Parameters.AddWithValue("$prompt", prompt);
             insertCmd.Parameters.AddWithValue("$responseMd", responseMd);
             insertCmd.Parameters.AddWithValue("$now", now);
+            insertCmd.Parameters.AddWithValue("$diffPatch", (object?)normalizedDiffPatch ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("$gitTreeBefore", (object?)normalizedTreeBefore ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("$gitTreeAfter", (object?)normalizedTreeAfter ?? DBNull.Value);
             id = (long)insertCmd.ExecuteScalar()!;
         }
 
         tx.Commit();
         _notifier.NotifyConversationAdded(effectiveRepo, sessionId, id);
 
-        return new ConversationRecord(id, sessionId, prompt, responseMd, now);
+        return new ConversationRecord(
+            id,
+            sessionId,
+            prompt,
+            responseMd,
+            now,
+            normalizedDiffPatch,
+            normalizedTreeBefore,
+            normalizedTreeAfter);
     }
 
     public IReadOnlyList<RepoSummary> GetRepos()
@@ -329,7 +374,7 @@ public sealed class HistoryRepository
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT id, session_id, prompt, response_md, created_at
+            SELECT id, session_id, prompt, response_md, created_at, diff_patch, git_tree_before, git_tree_after
             FROM conversations
             WHERE session_id = $sessionId
             ORDER BY id ASC;
@@ -345,7 +390,10 @@ public sealed class HistoryRepository
                 reader.GetString(1),
                 reader.GetString(2),
                 reader.GetString(3),
-                reader.GetString(4)));
+                reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7)));
         }
         return list;
     }

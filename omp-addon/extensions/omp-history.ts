@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -211,6 +211,67 @@ export function resolveRepoName(cwd: string): string {
   return fallback || "unknown";
 }
 
+export function captureGitTreeSnapshot(cwd: string): string | undefined {
+  try {
+    const gitConfigPath = findGitConfigPath(cwd);
+    if (!gitConfigPath) return undefined;
+    const repoRoot = resolveRepoRootPath(cwd);
+    const tmpIndex = path.join(
+      os.tmpdir(),
+      `omp-history-idx-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+    );
+    try {
+      const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
+      const addRes = spawnSync("git", ["add", "-A"], {
+        cwd: repoRoot,
+        env,
+        encoding: "utf8",
+        timeout: 4000,
+      });
+      if (addRes.status !== 0) return undefined;
+
+      const treeRes = spawnSync("git", ["write-tree"], {
+        cwd: repoRoot,
+        env,
+        encoding: "utf8",
+        timeout: 4000,
+      });
+      if (treeRes.status !== 0) return undefined;
+
+      const treeHash = (treeRes.stdout || "").trim();
+      return /^[0-9a-f]{40,64}$/i.test(treeHash) ? treeHash : undefined;
+    } finally {
+      try {
+        if (fs.existsSync(tmpIndex)) {
+          fs.unlinkSync(tmpIndex);
+        }
+      } catch {
+        // ignore cleanup error
+      }
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+export function computeGitTreeDiff(cwd: string, treeBefore?: string, treeAfter?: string): string | undefined {
+  if (!treeBefore || !treeAfter || treeBefore === treeAfter) return undefined;
+  try {
+    const repoRoot = resolveRepoRootPath(cwd);
+    const diffRes = spawnSync("git", ["diff", "--unified=3", treeBefore, treeAfter], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      timeout: 5000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    if (diffRes.status !== 0) return undefined;
+    const out = diffRes.stdout || "";
+    return out.trim().length > 0 ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function extractTextFromContent(content: unknown): string {
   if (typeof content === "string") {
     return content
@@ -369,6 +430,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   let lastKnownRepo: string | undefined;
   let latestUserPrompt: string | undefined;
   let promptInFlight = false;
+  let turnTreeBefore: string | undefined;
 
   function readSessionId(ctx: ExtensionContextView): string | undefined {
     try {
@@ -558,6 +620,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
         latestUserPrompt = msg;
         promptInFlight = true;
+        turnTreeBefore = captureGitTreeSnapshot(effectiveCwd);
 
         if (typeof pi.sendUserMessage === "function") {
           pi.sendUserMessage(msg);
@@ -588,6 +651,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     if (ctx?.agent?.kind && ctx.agent.kind !== "main") return;
     latestUserPrompt = undefined;
     promptInFlight = false;
+    turnTreeBefore = undefined;
     await syncSessionRegistration(ctx);
   });
 
@@ -617,6 +681,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     if (!text.startsWith("/")) {
       latestUserPrompt = text;
       promptInFlight = true;
+      turnTreeBefore = captureGitTreeSnapshot(ctx?.cwd || process.cwd());
     }
   });
 
@@ -628,6 +693,9 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
         .replace(/<system-notice>[\s\S]*?<\/system-notice>/g, "")
         .trim();
       promptInFlight = true;
+    }
+    if (!turnTreeBefore) {
+      turnTreeBefore = captureGitTreeSnapshot(ctx?.cwd || process.cwd());
     }
     await checkAndSyncSessionRename(ctx);
   });
@@ -646,12 +714,14 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     const fromEvent = extractLatestTurnFromMessages(eventMessages);
     if (fromEvent?.aborted) {
       promptInFlight = false;
+      turnTreeBefore = undefined;
       return;
     }
 
     const fromBranch = !fromEvent ? extractLatestTurnFromMessages(branchEntries) : undefined;
     if (fromBranch?.aborted) {
       promptInFlight = false;
+      turnTreeBefore = undefined;
       return;
     }
 
@@ -660,6 +730,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
     if (!prompt || !responseMd) {
       promptInFlight = false;
+      turnTreeBefore = undefined;
       return;
     }
     if (!promptInFlight && !fromEvent) return;
@@ -672,6 +743,11 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     const sessionName = readSessionName(ctx);
     lastKnownSessionName = sessionName;
 
+    const treeBefore = turnTreeBefore;
+    turnTreeBefore = undefined;
+    const treeAfter = captureGitTreeSnapshot(effectiveCwd);
+    const diffPatch = computeGitTreeDiff(effectiveCwd, treeBefore, treeAfter);
+
     await requestWithRetryPrompt(ctx, "POST", "/api/conversations", {
       sessionId,
       repo,
@@ -679,6 +755,9 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
       sessionName,
       prompt,
       responseMd,
+      diffPatch,
+      gitTreeBefore: treeBefore,
+      gitTreeAfter: treeAfter,
     });
   });
 

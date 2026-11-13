@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @implements IDisposable
 @using Markdig
+@using System.Text.RegularExpressions
 @inject HistoryRepository Repository
 @inject HistoryNotifier Notifier
 @inject ActiveSessionTracker SessionTracker
@@ -231,10 +232,26 @@
                     {
                         var conv = item.Record;
                         var isSelected = conv.Id == _selectedConversationId;
+                        var hasTurnDiff = !string.IsNullOrWhiteSpace(conv.DiffPatch);
+                        var hasTreeSnapshot = !string.IsNullOrWhiteSpace(conv.GitTreeBefore) || !string.IsNullOrWhiteSpace(conv.GitTreeAfter);
                         <div class="list-card conversation-card @(isSelected ? "selected" : "")"
                              @onclick="() => SelectConversation(conv.Id)">
                             <div class="conversation-header">
-                                <span class="turn-badge">#@item.TurnNumber</span>
+                                <div class="conversation-header-left">
+                                    <span class="turn-badge">#@item.TurnNumber</span>
+                                    @if (hasTurnDiff)
+                                    {
+                                        var parsedSummary = GitCompareService.ParseUnifiedDiff(conv.DiffPatch);
+                                        <span class="turn-diff-badge" title="@parsedSummary.ChangedFiles.Count file(s) changed (+@parsedSummary.TotalAdditions / -@parsedSummary.TotalDeletions)">
+                                            <span class="git-stat-add">+@parsedSummary.TotalAdditions</span>
+                                            <span class="git-stat-del">-@parsedSummary.TotalDeletions</span>
+                                        </span>
+                                    }
+                                    else if (hasTreeSnapshot)
+                                    {
+                                        <span class="turn-snapshot-dot" title="Git snapshot recorded for this turn"></span>
+                                    }
+                                </div>
                                 <span class="turn-time">@FormatTimestamp(conv.CreatedAt)</span>
                             </div>
                             <div class="conversation-preview">@TruncatePreview(conv.Prompt, 110)</div>
@@ -322,6 +339,15 @@
                                         @onclick='() => SelectGitMode("compare")'>
                                     <span>Compare Refs / Commits</span>
                                 </button>
+                                <button type="button"
+                                        class="git-mode-tab @(_gitCompareMode == "turns" ? "active" : "")"
+                                        @onclick='() => SelectGitMode("turns")'>
+                                    <span>Compare Messages</span>
+                                    @if (ConversationsWithSnapshots.Count > 0)
+                                    {
+                                        <span class="git-mode-count">@ConversationsWithSnapshots.Count</span>
+                                    }
+                                </button>
                             </div>
 
                             @if (_gitCompareMode == "latest" && _gitOverview?.IsAvailable == true)
@@ -379,6 +405,54 @@
                                         </select>
                                     </label>
                                 </div>
+                            }
+                            else if (_gitCompareMode == "turns")
+                            {
+                                @if (ConversationsWithSnapshots.Count == 0)
+                                {
+                                    <div class="git-ref-selectors">
+                                        <span class="git-ref-label">No message git snapshots recorded in this session yet.</span>
+                                    </div>
+                                }
+                                else
+                                {
+                                    <div class="git-ref-selectors">
+                                        <label class="git-ref-label">
+                                            <span>From</span>
+                                            <select class="git-ref-select" value="@_gitBaseRef" @onchange="OnGitBaseRefChanged">
+                                                @foreach (var item in ConversationsWithSnapshots)
+                                                    {
+                                                        if (!string.IsNullOrWhiteSpace(item.Record.GitTreeBefore))
+                                                        {
+                                                            <option value="@item.Record.GitTreeBefore">Before #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
+                                                        }
+                                                        if (!string.IsNullOrWhiteSpace(item.Record.GitTreeAfter))
+                                                        {
+                                                            <option value="@item.Record.GitTreeAfter">After #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
+                                                        }
+                                                    }
+                                            </select>
+                                        </label>
+                                        <span class="git-ref-arrow">→</span>
+                                        <label class="git-ref-label">
+                                            <span>To</span>
+                                            <select class="git-ref-select" value="@_gitTargetRef" @onchange="OnGitTargetRefChanged">
+                                                <option value="WORKING">Working Tree (Current Files)</option>
+                                                @foreach (var item in ConversationsWithSnapshots)
+                                                {
+                                                    if (!string.IsNullOrWhiteSpace(item.Record.GitTreeAfter))
+                                                    {
+                                                        <option value="@item.Record.GitTreeAfter">After #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
+                                                    }
+                                                    if (!string.IsNullOrWhiteSpace(item.Record.GitTreeBefore))
+                                                    {
+                                                        <option value="@item.Record.GitTreeBefore">Before #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
+                                                    }
+                                                }
+                                            </select>
+                                        </label>
+                                    </div>
+                                }
                             }
 
                             <div class="git-file-filter-box">
@@ -496,6 +570,86 @@
                             @((MarkupString)RenderMarkdown(SelectedConversation.ResponseMd))
                         </div>
                     </section>
+
+                    @if (!string.IsNullOrWhiteSpace(SelectedConversation.DiffPatch))
+                    {
+                        var turnDiff = GitCompareService.ParseUnifiedDiff(
+                            SelectedConversation.DiffPatch,
+                            $"Turn Changes",
+                            _turnFileFilter);
+                        <section class="detail-section turn-diff-section" @oncontextmenu:stopPropagation="false">
+                            <div class="section-label">
+                                <div class="section-label-left">
+                                    <span>FILES CHANGED IN THIS MESSAGE</span>
+                                    <span class="git-stat-add">+@turnDiff.TotalAdditions</span>
+                                    <span class="git-stat-del">-@turnDiff.TotalDeletions</span>
+                                    <span>(@turnDiff.ChangedFiles.Count @(turnDiff.ChangedFiles.Count == 1 ? "file" : "files"))</span>
+                                </div>
+                                <div class="turn-diff-actions">
+                                    <div class="git-format-toggle" role="group" aria-label="Turn diff layout">
+                                        <button type="button"
+                                                class="git-format-btn @(_gitOutputFormat == "line-by-line" ? "active" : "")"
+                                                @onclick='() => SetTurnDiffOutputFormat("line-by-line")'>
+                                            Unified
+                                        </button>
+                                        <button type="button"
+                                                class="git-format-btn @(_gitOutputFormat == "side-by-side" ? "active" : "")"
+                                                @onclick='() => SetTurnDiffOutputFormat("side-by-side")'>
+                                            Side-by-Side
+                                        </button>
+                                    </div>
+                                    @if (ConversationsWithSnapshots.Count > 0)
+                                    {
+                                        <button type="button"
+                                                class="git-action-btn"
+                                                title="Open in Git Compare to compare across any two messages"
+                                                @onclick="() => OpenCompareMessagesForTurn(SelectedConversation)">
+                                            ⇄ Compare Messages
+                                        </button>
+                                    }
+                                </div>
+                            </div>
+
+                            @if (turnDiff.ChangedFiles.Count > 1)
+                            {
+                                <div class="git-file-chips turn-diff-file-chips">
+                                    <button type="button"
+                                            class="git-file-chip @(string.IsNullOrWhiteSpace(_turnFileFilter) ? "active" : "")"
+                                            @onclick="ClearTurnFileFilter">
+                                        All files
+                                    </button>
+                                    @foreach (var f in turnDiff.ChangedFiles)
+                                    {
+                                        var isFileSelected = string.Equals(_turnFileFilter?.Trim(), f.Path, StringComparison.Ordinal);
+                                        <button type="button"
+                                                class="git-file-chip @(isFileSelected ? "active" : "")"
+                                                title="@f.Path (+@f.Additions / -@f.Deletions)"
+                                                @onclick="() => ToggleTurnFileChip(f.Path)">
+                                            <span class="git-file-status status-@f.Status.ToLowerInvariant()">@f.Status</span>
+                                            <span class="git-file-name">@f.Path</span>
+                                            <span class="git-stat-add">+@f.Additions</span>
+                                            <span class="git-stat-del">-@f.Deletions</span>
+                                        </button>
+                                    }
+                                </div>
+                            }
+
+                            <div id="omp-turn-diff-container" class="omp-diff2html-wrapper" @key="@($"{SelectedConversation.Id}:{_gitOutputFormat}:{_turnFileFilter}")"></div>
+                        </section>
+                    }
+                    else if (!string.IsNullOrWhiteSpace(SelectedConversation.GitTreeBefore) || !string.IsNullOrWhiteSpace(SelectedConversation.GitTreeAfter))
+                    {
+                        <section class="detail-section turn-diff-section">
+                            <div class="turn-no-diff-bar">
+                                <span>No files modified during this message (git snapshot recorded).</span>
+                                <button type="button"
+                                        class="git-action-btn"
+                                        @onclick="() => OpenCompareMessagesForTurn(SelectedConversation)">
+                                    ⇄ Compare Messages
+                                </button>
+                            </div>
+                        </section>
+                    }
                 </div>
             }
 
@@ -661,6 +815,10 @@
         .UseAdvancedExtensions()
         .Build();
 
+    private static readonly Regex EmbeddedMarkdownBlockRegex = new(
+        @"<pre><code class=""language-(?:markdown|md)"">([\s\S]*?)</code></pre>",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
     private IReadOnlyList<RepoSummary> _repos = [];
     private IReadOnlyList<SessionRecord> _sessions = [];
     private IReadOnlyList<ConversationRecord> _conversations = [];
@@ -694,6 +852,7 @@
     private GitRepoOverview? _gitOverview;
     private GitDiffResult? _gitDiffResult;
     private bool _gitDiffNeedsRender;
+    private string _turnFileFilter = string.Empty;
 
 
     private bool IsSelectedSessionActive => SessionTracker.IsSessionActive(_selectedSessionId);
@@ -721,6 +880,23 @@
                 }
             }
 
+            return list;
+        }
+    }
+
+    private IReadOnlyList<IndexedConversation> ConversationsWithSnapshots
+    {
+        get
+        {
+            var list = new List<IndexedConversation>();
+            for (var i = 0; i < _conversations.Count; i++)
+            {
+                var c = _conversations[i];
+                if (!string.IsNullOrWhiteSpace(c.GitTreeBefore) || !string.IsNullOrWhiteSpace(c.GitTreeAfter))
+                {
+                    list.Add(new IndexedConversation(i + 1, c));
+                }
+            }
             return list;
         }
     }
@@ -776,6 +952,19 @@
             try
             {
                 await JS.InvokeVoidAsync("ompHistoryRenderMermaid");
+                if (!string.IsNullOrWhiteSpace(SelectedConversation.DiffPatch))
+                {
+                    var turnDiff = GitCompareService.ParseUnifiedDiff(
+                        SelectedConversation.DiffPatch,
+                        "Turn Changes",
+                        _turnFileFilter);
+                    await JS.InvokeVoidAsync(
+                        "ompHistoryRenderGitDiff",
+                        "omp-turn-diff-container",
+                        turnDiff.RawDiff,
+                        _gitOutputFormat,
+                        turnDiff.ChangedFiles.Count > 1);
+                }
             }
             catch
             {
@@ -917,6 +1106,7 @@
     private void SelectConversation(long conversationId)
     {
         _selectedConversationId = conversationId;
+        _turnFileFilter = string.Empty;
         _isGitCompareOpen = false;
     }
 
@@ -1018,6 +1208,10 @@
                 _gitTargetRef = "HEAD";
             }
         }
+        else if (mode == "turns")
+        {
+            InitializeTurnComparisonRefs(SelectedConversation);
+        }
         RunGitDiff();
     }
 
@@ -1025,6 +1219,64 @@
     {
         _gitOutputFormat = format;
         _gitDiffNeedsRender = true;
+    }
+
+    private void SetTurnDiffOutputFormat(string format)
+    {
+        _gitOutputFormat = format;
+    }
+
+    private void ClearTurnFileFilter()
+    {
+        _turnFileFilter = string.Empty;
+    }
+
+    private void ToggleTurnFileChip(string filePath)
+    {
+        if (string.Equals(_turnFileFilter?.Trim(), filePath, StringComparison.Ordinal))
+        {
+            _turnFileFilter = string.Empty;
+        }
+        else
+        {
+            _turnFileFilter = filePath;
+        }
+    }
+
+    private void OpenCompareMessagesForTurn(ConversationRecord turn)
+    {
+        _isGitCompareOpen = true;
+        var repoSummary = _repos.FirstOrDefault(r => string.Equals(r.Repo, _selectedRepo, StringComparison.Ordinal));
+        _gitOverview = GitCompare.GetRepoOverview(_selectedRepo, repoSummary?.RepoPath);
+        _gitCompareMode = "turns";
+        _gitFileFilter = string.Empty;
+        InitializeTurnComparisonRefs(turn);
+        RunGitDiff();
+    }
+
+    private void InitializeTurnComparisonRefs(ConversationRecord? preferredTurn)
+    {
+        var snaps = ConversationsWithSnapshots;
+        if (snaps.Count == 0)
+        {
+            return;
+        }
+
+        var targetTurn = preferredTurn is not null
+            ? snaps.FirstOrDefault(s => s.Record.Id == preferredTurn.Id)?.Record ?? snaps[^1].Record
+            : snaps[^1].Record;
+
+        if (!string.IsNullOrWhiteSpace(targetTurn.GitTreeBefore) && !string.IsNullOrWhiteSpace(targetTurn.GitTreeAfter))
+        {
+            _gitBaseRef = targetTurn.GitTreeBefore;
+            _gitTargetRef = targetTurn.GitTreeAfter;
+            return;
+        }
+
+        var firstTree = snaps[0].Record.GitTreeBefore ?? snaps[0].Record.GitTreeAfter ?? "HEAD";
+        var lastTree = snaps[^1].Record.GitTreeAfter ?? snaps[^1].Record.GitTreeBefore ?? "WORKING";
+        _gitBaseRef = firstTree;
+        _gitTargetRef = lastTree;
     }
 
     private void OnGitSingleCommitChanged(ChangeEventArgs e)
@@ -1232,7 +1484,23 @@
         {
             return "<em>(Empty response)</em>";
         }
-        return Markdown.ToHtml(markdown, Pipeline);
+        return RenderMarkdownPass(markdown, depth: 0);
+    }
+
+    private static string RenderMarkdownPass(string markdown, int depth)
+    {
+        var html = Markdown.ToHtml(markdown, Pipeline);
+        if (depth >= 2)
+        {
+            return html;
+        }
+
+        return EmbeddedMarkdownBlockRegex.Replace(html, match =>
+        {
+            var innerMarkdown = System.Net.WebUtility.HtmlDecode(match.Groups[1].Value);
+            var innerHtml = RenderMarkdownPass(innerMarkdown, depth + 1);
+            return $"<div class=\"embedded-markdown\">{innerHtml}</div>";
+        });
     }
 
     private static string TruncatePreview(string? text, int maxLength)

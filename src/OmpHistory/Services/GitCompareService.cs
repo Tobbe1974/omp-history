@@ -280,6 +280,40 @@ public sealed class GitCompareService
                 break;
             }
 
+            case "turns":
+            {
+                var fromTree = string.IsNullOrWhiteSpace(baseRef) ? "HEAD" : baseRef.Trim();
+                var toTree = string.IsNullOrWhiteSpace(targetRef) ? "HEAD" : targetRef.Trim();
+                if (string.Equals(fromTree, toTree, StringComparison.OrdinalIgnoreCase))
+                {
+                    return new GitDiffResult(
+                        IsAvailable: true,
+                        Mode: normalizedMode,
+                        Title: $"{fromTree[..Math.Min(8, fromTree.Length)]} → {toTree[..Math.Min(8, toTree.Length)]}",
+                        RepoPath: repoPath,
+                        RawDiff: string.Empty,
+                        TotalAdditions: 0,
+                        TotalDeletions: 0,
+                        ChangedFiles: []);
+                }
+                title = string.Equals(toTree, "WORKING", StringComparison.OrdinalIgnoreCase)
+                    ? $"{fromTree[..Math.Min(8, fromTree.Length)]} → Working Tree"
+                    : $"{fromTree[..Math.Min(8, fromTree.Length)]} → {toTree[..Math.Min(8, toTree.Length)]}";
+                if (string.Equals(toTree, "WORKING", StringComparison.OrdinalIgnoreCase))
+                {
+                    diffArgs = ["diff", "--unified=3", fromTree];
+                    numstatArgs = ["diff", "--numstat", fromTree];
+                    nameStatusArgs = ["diff", "--name-status", fromTree];
+                }
+                else
+                {
+                    diffArgs = ["diff", "--unified=3", fromTree, toTree];
+                    numstatArgs = ["diff", "--numstat", fromTree, toTree];
+                    nameStatusArgs = ["diff", "--name-status", fromTree, toTree];
+                }
+                break;
+            }
+
             case "working":
             default:
             {
@@ -423,6 +457,122 @@ public sealed class GitCompareService
             Title: title,
             RepoPath: repoPath,
             RawDiff: rawDiff,
+            TotalAdditions: totalAdd,
+            TotalDeletions: totalDel,
+            ChangedFiles: files);
+    }
+
+    public static GitDiffResult ParseUnifiedDiff(string? rawDiff, string title = "Turn Changes", string? fileFilter = null)
+    {
+        if (string.IsNullOrWhiteSpace(rawDiff))
+        {
+            return new GitDiffResult(
+                IsAvailable: true,
+                Mode: "turn",
+                Title: title,
+                RepoPath: null,
+                RawDiff: string.Empty,
+                TotalAdditions: 0,
+                TotalDeletions: 0,
+                ChangedFiles: []);
+        }
+
+        var cleanFilter = string.IsNullOrWhiteSpace(fileFilter) ? null : fileFilter.Trim();
+        var files = new List<GitFileChange>();
+        var totalAdd = 0;
+        var totalDel = 0;
+        var filteredDiffBuilder = new StringBuilder();
+
+        var lines = rawDiff.Replace("\r\n", "\n").Split('\n');
+        string? currentPath = null;
+        var currentStatus = "M";
+        var currentAdd = 0;
+        var currentDel = 0;
+        var currentChunk = new List<string>();
+
+        void FlushCurrent()
+        {
+            if (currentPath is null)
+            {
+                return;
+            }
+
+            files.Add(new GitFileChange(currentStatus, currentPath, currentAdd, currentDel));
+            totalAdd += currentAdd;
+            totalDel += currentDel;
+
+            if (string.IsNullOrEmpty(cleanFilter)
+                || currentPath.Contains(cleanFilter, StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var cl in currentChunk)
+                {
+                    filteredDiffBuilder.AppendLine(cl);
+                }
+            }
+        }
+
+        foreach (var line in lines)
+        {
+            if (line.StartsWith("diff --git ", StringComparison.Ordinal))
+            {
+                FlushCurrent();
+                currentChunk.Clear();
+                currentAdd = 0;
+                currentDel = 0;
+                currentStatus = "M";
+
+                var bIndex = line.LastIndexOf(" b/", StringComparison.Ordinal);
+                if (bIndex > 0)
+                {
+                    currentPath = line[(bIndex + 3)..].Trim();
+                }
+                else
+                {
+                    currentPath = line["diff --git ".Length..].Trim();
+                }
+                currentChunk.Add(line);
+                continue;
+            }
+
+            if (currentPath is null)
+            {
+                continue;
+            }
+
+            currentChunk.Add(line);
+
+            if (line.StartsWith("new file mode ", StringComparison.Ordinal)
+                || line.StartsWith("--- /dev/null", StringComparison.Ordinal))
+            {
+                currentStatus = "A";
+            }
+            else if (line.StartsWith("deleted file mode ", StringComparison.Ordinal)
+                || line.StartsWith("+++ /dev/null", StringComparison.Ordinal))
+            {
+                currentStatus = "D";
+            }
+            else if (line.StartsWith("rename from ", StringComparison.Ordinal))
+            {
+                currentStatus = "R";
+            }
+            else if (line.StartsWith('+') && !line.StartsWith("+++", StringComparison.Ordinal))
+            {
+                currentAdd++;
+            }
+            else if (line.StartsWith('-') && !line.StartsWith("---", StringComparison.Ordinal))
+            {
+                currentDel++;
+            }
+        }
+
+        FlushCurrent();
+
+        return new GitDiffResult(
+            IsAvailable: true,
+            Mode: "turn",
+            Title: title,
+            RepoPath: null,
+            RawDiff: filteredDiffBuilder.ToString().TrimEnd(),
             TotalAdditions: totalAdd,
             TotalDeletions: totalDel,
             ChangedFiles: files);

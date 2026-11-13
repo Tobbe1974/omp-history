@@ -11,11 +11,13 @@
   - Groups sessions by Git repository name (resolved from `.git/config` remote URL, falling back to directory name).
   - Logs only the user prompt and final Markdown response (`type === "text"`), stripping model thinking blocks and intermediate tool noise.
   - Tracks session renames (`/rename` or title updates) in real time.
+  - Captures non-invasive Git tree snapshots (`GIT_INDEX_FILE` + `git write-tree`) before and after each turn to record per-message file diffs (`diffPatch`, `gitTreeBefore`, `gitTreeAfter`) without touching `.git/index` or creating commits.
 
 - **Rich Markdown, Math & Diagram Rendering**:
   - Full GitHub-flavored/advanced Markdown via **Markdig**.
   - Client-side **Mermaid** diagram rendering (` ```mermaid `).
   - Client-side **KaTeX** math rendering (`$...$`, `$$...$$`, `\(...\)`, `\[...\]`).
+  - Embedded ` ```markdown ` / ` ```md ` fenced blocks rendered as formatted Markdown cards instead of raw source text.
 
 - **Live Workspace UI**:
   - Real-time push updates when new sessions or conversation turns arrive.
@@ -23,6 +25,7 @@
   - **Pin Lists** toggle to collapse the Sessions & Conversations sidebars and focus on the response pane.
   - Instant conversation search/filtering across prompts and model responses.
   - Session deletion with confirmation modal.
+  - **Per-Message Diffs & Compare Messages**: Displays modified files (`+X -Y`) directly beneath any conversation turn and supports comparing file state between any two messages in **Git Compare → Compare Messages**.
 
 - **Active Session Detection & Two-Way Feedback to OMP**:
   - Detects which sessions are currently active in running OMP terminals (via extension heartbeats and `/proc` inspection) and marks them with a green **`● ACTIVE`** badge.

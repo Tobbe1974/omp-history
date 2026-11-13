@@ -665,6 +665,31 @@ html, body {
     margin-bottom: 6px;
 }
 
+.conversation-header-left {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.turn-diff-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 6px;
+    border-radius: 4px;
+    background-color: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border-color);
+    font-size: 10.5px;
+}
+
+.turn-snapshot-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: var(--accent-color);
+    opacity: 0.65;
+}
+
 .turn-badge {
     font-size: 11px;
     font-weight: 700;
@@ -838,6 +863,45 @@ html, body {
     height: auto;
 }
 
+.markdown-body .embedded-markdown {
+    background-color: var(--bg-elevated);
+    border: 1px solid var(--border-color);
+    border-left: 3px solid var(--accent-color);
+    border-radius: 6px;
+    padding: 14px 18px;
+    margin-bottom: 1em;
+}
+
+.markdown-body .embedded-markdown > :last-child {
+    margin-bottom: 0;
+}
+
+
+.turn-diff-section {
+    margin-top: 4px;
+}
+
+.turn-diff-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.turn-diff-file-chips {
+    margin-bottom: 6px;
+}
+
+.turn-no-diff-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-radius: 8px;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 12.5px;
+}
 /* Active/Inactive Session Banner & Feedback Hints */
 .detail-pane {
     position: relative;

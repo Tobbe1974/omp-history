@@ -19,7 +19,10 @@ public sealed record ConversationRecord(
     string SessionId,
     string Prompt,
     string ResponseMd,
-    string CreatedAt);
+    string CreatedAt,
+    string? DiffPatch = null,
+    string? GitTreeBefore = null,
+    string? GitTreeAfter = null);
 
 public sealed record CreateSessionRequest(
     string SessionId,
@@ -38,7 +41,10 @@ public sealed record CreateConversationRequest(
     string ResponseMd,
     string? Repo = null,
     string? SessionName = null,
-    string? RepoPath = null);
+    string? RepoPath = null,
+    string? DiffPatch = null,
+    string? GitTreeBefore = null,
+    string? GitTreeAfter = null);
 public sealed record FeedbackItem(
     string Id,
     string SessionId,

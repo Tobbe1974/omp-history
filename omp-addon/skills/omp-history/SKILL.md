@@ -6,14 +6,16 @@ alwaysApply: true
 
 # omp-history Skill & Addon
 
-`omp-history` records OMP sessions and completed user/assistant conversation turns into the local C# / Blazor / SQLite history server (`http://localhost:5180` by default, configurable via `OMP_HISTORY_PORT`, `OMP_HISTORY_URL`, and `OMP_HISTORY_DIR` / `OMP_HISTORY_PROJECT_DIR`).
+`omp-history` records OMP sessions and completed user/assistant conversation turns into a local or remote C# / Blazor / SQLite history server (configured via `OMP_HISTORY_URL` or `OMP_HISTORY_PORT`, and optional Basic Auth via `OMP_HISTORY_AUTH`).
 
 ## Behavior
 
 1. **Autoloaded on Startup**:
    - The extension at `~/.omp/agent/extensions/omp-history.ts` loads automatically when OMP starts.
+   - Warns if neither `OMP_HISTORY_URL` nor `OMP_HISTORY_PORT` is set in the environment.
+   - Sends `Authorization: Basic ...` header automatically when `OMP_HISTORY_AUTH` (`user:pass` or `pass`) is set.
    - Extracts `repo` from the last segment of the `.git/config` remote URL (stripping `.git`), falling back to the working directory basename.
-   - Registers the current session (`POST /api/sessions` with `{ sessionId, repo, name }`).
+   - Registers the current session (`POST /api/sessions` with `{ sessionId, repo, repoPath, name }`).
 
 2. **Session Rename**:
    - When a session is renamed (via `/rename` or title changes), sends `PUT /api/sessions/{sessionId}` with `{ name, repo }`.
@@ -28,15 +30,28 @@ alwaysApply: true
      `"Could not post to omp-history. Start server/Retry/Disable"` with choices `Start server`, `Retry`, and `Disable`.
    - Selecting `Start server` runs `dotnet run` in `src/OmpHistory` in the background, waits for `http://localhost:5180` to come online, and retries the request; selecting `Retry` immediately retries the request; selecting `Disable` disables posting for the remainder of the session (can be re-enabled anytime with `/omp-history enable` or `/omp-history start`).
 
+
+5. **Cross-Machine Session Resume (`/omp-history resume [sessionId]`)**:
+   - Lists sessions from `omp-history` for the current repo (falling back to all repos) or matches a provided `sessionId` prefix.
+   - Downloads a synthesized OMP v3 `.jsonl` file from `GET /api/sessions/{sessionId}/export-jsonl?cwd=<localRepoRoot>`, writes it to `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<sessionId>.jsonl`, and switches the live session into it via `ctx.switchSession(...)` so work continues under the exact same `sessionId`.
+
+## Output Formatting Rules (No Nested Markdown Fences)
+
+- All assistant replies logged to `omp-history` are **already rendered as Markdown**.
+- **NEVER** wrap drafted stories, tickets, documentation, or Markdown content in outer ```` ```markdown ```` or ```` ```md ```` fenced code blocks (especially when creating stories/tickets that themselves contain code blocks or formatting), because nested Markdown fences break outer fence parsing and rendering.
+- Write story/ticket/document content directly as top-level Markdown headings, lists, and blockquotes in your response.
+
 ## REST API Reference
 
-- `POST http://localhost:5180/api/sessions`
-  - Body: `{ "sessionId": "<id>", "repo": "<repo>", "name": "<session-name>" }`
-- `PUT http://localhost:5180/api/sessions/{sessionId}`
-  - Body: `{ "name": "<new-name>", "repo": "<repo>" }`
-- `DELETE http://localhost:5180/api/sessions/{sessionId}`
-- `POST http://localhost:5180/api/conversations`
+- `POST /api/sessions`
+  - Body: `{ "sessionId": "<id>", "repo": "<repo>", "repoPath": "<path>", "name": "<session-name>" }`
+- `PUT /api/sessions/{sessionId}`
+  - Body: `{ "name": "<new-name>", "repo": "<repo>", "repoPath": "<path>" }`
+- `DELETE /api/sessions/{sessionId}`
+- `GET /api/deleted-sessions`
+- `POST /api/conversations`
   - Body: `{ "sessionId": "<id>", "repo": "<repo>", "repoPath": "<path>", "sessionName": "<name>", "prompt": "<user-question>", "responseMd": "<final-markdown-reply>", "diffPatch": "<unified-diff>", "gitTreeBefore": "<sha>", "gitTreeAfter": "<sha>" }`
-- `GET http://localhost:5180/api/repos`
-- `GET http://localhost:5180/api/repos/{repo}/sessions`
-- `GET http://localhost:5180/api/sessions/{sessionId}/conversations`
+- `GET /api/repos`
+- `GET /api/repos/{repo}/sessions`
+- `GET /api/sessions/{sessionId}/conversations`
+- `GET /api/sessions/{sessionId}/export-jsonl?cwd=<path>`

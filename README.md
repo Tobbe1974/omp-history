@@ -31,9 +31,16 @@
   - Detects which sessions are currently active in running OMP terminals (via extension heartbeats and `/proc` inspection) and marks them with a green **`● ACTIVE`** badge.
   - **Right-click Feedback Card**: Select any text in a model response (or right-click anywhere in the detail pane) to open a Word-style comment card, quote the selected passage, and post feedback directly back into the running OMP session as a new turn.
 
-- **Resilient Startup & Recovery**:
-  - If the history server isn't running when OMP tries to log a turn, OMP prompts `Start server / Retry / Disable` and can launch the server in the background automatically.
+- **Cross-Machine Session Resume (`/omp-history resume`)**:
+  - Synthesizes a clean OMP v3 `.jsonl` session transcript directly from the SQLite database (`GET /api/sessions/{sessionId}/export-jsonl`) and switches into it on any machine — keeping the exact same `sessionId` across desktop and laptop without transferring multi-megabyte raw session logs.
 
+- **Basic Authentication & Reverse Proxy Support**:
+  - Optional HTTP Basic Auth via `OMP_HISTORY_AUTH` (`user:password` or password-only `omp:<password>`).
+  - Supports hosting under a subpath (e.g. `/omp-history` behind Nginx) via `X-Forwarded-Prefix` or `OMP_HISTORY_PATH_BASE`.
+
+- **Resilient Startup & Recovery**:
+  - Warns on startup if `OMP_HISTORY_URL` (or `OMP_HISTORY_PORT`) is not configured.
+  - If the history server isn't reachable when OMP tries to log a turn, OMP prompts `Start server / Retry / Disable`.
 ---
 
 ## Repository Structure
@@ -67,21 +74,23 @@ omp-history/
 
 ### 1. Setup Configuration
 
-Set `OMP_HISTORY_PROJECT_DIR` (or `OMP_HISTORY_DIR`) in your shell profile (`~/.bashrc` / `~/.zshrc`) so the OMP extension knows where the server project is located, and optionally customize the port or URL:
+Set `OMP_HISTORY_URL` (or `OMP_HISTORY_PORT`) and optionally `OMP_HISTORY_AUTH` in your shell profile (`~/.bashrc` / `~/.zshrc`):
 
 ```bash
-export OMP_HISTORY_PROJECT_DIR="/path/to/omp-history"
-export OMP_HISTORY_PORT="5180" # optional, defaults to 5180
+export OMP_HISTORY_URL="https://skegriebyavag13.duckdns.org/omp-history"
+export OMP_HISTORY_AUTH="omp:your-secret-password"
 ```
 
 | Environment Variable | Description | Default |
 | :--- | :--- | :--- |
-| `OMP_HISTORY_PROJECT_DIR` | Path to the `omp-history` repo or `src/OmpHistory` (used by OMP to auto-start the server) | Auto-detected |
-| `OMP_HISTORY_PORT` | Port for the local server (`http://localhost:<port>`) | `5180` |
-| `OMP_HISTORY_URL` | Explicit base URL (overrides `OMP_HISTORY_PORT`) | `http://localhost:5180` |
-| `ASPNETCORE_URLS` | Standard ASP.NET Core binding URL override | — |
+| `OMP_HISTORY_URL` | Base URL for the `omp-history` server (required unless `OMP_HISTORY_PORT` is set) | — (warns if unset) |
+| `OMP_HISTORY_PORT` | Port for a local server (`http://localhost:<port>`) when `OMP_HISTORY_URL` is not set | — |
+| `OMP_HISTORY_AUTH` | Basic Auth credentials (`username:password` or `password` which defaults to user `omp`) | Disabled if unset |
+| `OMP_HISTORY_PATH_BASE` | Optional subpath prefix when hosted behind a reverse proxy (e.g. `/omp-history`) | — |
+| `OMP_HISTORY_PROJECT_DIR` | Path to the `omp-history` repo or `src/OmpHistory` (used by `/omp-history start`) | Auto-detected |
+| `ASPNETCORE_URLS` | Standard ASP.NET Core binding URL override for the server | `http://localhost:5180` |
 
-You can also override the SQLite database path in `src/OmpHistory/appsettings.json` via `"Database": { "Path": "/path/to/omp-history.db" }`.
+You can also override the SQLite database path in `src/OmpHistory/appsettings.json` via `"Database": { "Path": "/path/to/omp-history.db" }` (or environment variable `Database__Path`).
 
 ### 2. Install the OMP Extension & Skill
 
@@ -111,11 +120,11 @@ You do **not** need to start the server manually if your configuration is set:
 
 Inside any OMP session, use `/omp-history`:
 
-- `/omp-history status` — Show whether logging is enabled, the active server URL, and resolved repo name.
-- `/omp-history start` — Start the `omp-history` server in the background and enable logging.
+- `/omp-history resume [sessionId]` — Interactive picker (or direct by ID) to download a session's conversation history from `omp-history` as a local `.jsonl` file and switch the active OMP session into it (preserving the same `sessionId`).
+- `/omp-history status` — Show whether logging is enabled, the active server URL, auth status, and resolved repo name.
+- `/omp-history start` — Start a local `omp-history` server in the background and enable logging.
 - `/omp-history enable` (`on`) — Re-enable logging for the current session.
 - `/omp-history disable` (`off`) — Disable logging for the current session.
-
 ---
 
 ## REST API
@@ -124,8 +133,11 @@ Inside any OMP session, use `/omp-history`:
 | :--- | :--- | :--- |
 | `GET` | `/api/repos` | List all recorded repositories and session counts |
 | `GET` | `/api/repos/{repo}/sessions` | List sessions for a repository |
-| `POST` | `/api/sessions` | Create or update a session (`{ sessionId, repo, name }`) |
-| `PUT` | `/api/sessions/{sessionId}` | Rename a session (`{ name, repo }`) |
+| `GET` | `/api/sessions` | List recent sessions across all repositories (or filter by `?repo=`) |
+| `GET` | `/api/sessions/{sessionId}` | Get metadata for a specific session |
+| `GET` | `/api/sessions/{sessionId}/export-jsonl` | Synthesize an OMP v3 `.jsonl` transcript from recorded conversations (`?cwd=/local/repo/path`) |
+| `POST` | `/api/sessions` | Create or update a session (`{ sessionId, repo, name, repoPath }`) |
+| `PUT` | `/api/sessions/{sessionId}` | Rename a session (`{ name, repo, repoPath }`) |
 | `DELETE` | `/api/sessions/{sessionId}` | Delete a session and its conversations |
 | `GET` | `/api/sessions/{sessionId}/conversations` | List all conversation turns in a session |
 | `POST` | `/api/conversations` | Record a completed conversation turn (`{ sessionId, repo, sessionName, prompt, responseMd }`) |

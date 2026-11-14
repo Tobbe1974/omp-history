@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using OmpHistory.Models;
 
@@ -66,6 +68,11 @@ public sealed class HistoryRepository
             );
 
             CREATE INDEX IF NOT EXISTS idx_conversations_session_id ON conversations(session_id);
+
+            CREATE TABLE IF NOT EXISTS deleted_sessions (
+                session_id TEXT PRIMARY KEY,
+                deleted_at TEXT NOT NULL
+            );
             """;
         cmd.ExecuteNonQuery();
 
@@ -117,6 +124,7 @@ public sealed class HistoryRepository
                 name = excluded.name,
                 updated_at = excluded.updated_at,
                 repo_path = COALESCE(excluded.repo_path, sessions.repo_path);
+            DELETE FROM deleted_sessions WHERE session_id = $sessionId;
             """;
         cmd.Parameters.AddWithValue("$sessionId", sessionId);
         cmd.Parameters.AddWithValue("$repo", normalizedRepo);
@@ -185,17 +193,49 @@ public sealed class HistoryRepository
 
     public bool DeleteSession(string sessionId)
     {
+        var now = DateTime.UtcNow.ToString("O");
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "DELETE FROM sessions WHERE session_id = $sessionId;";
         cmd.Parameters.AddWithValue("$sessionId", sessionId);
         var rows = cmd.ExecuteNonQuery();
+
+        using var tombCmd = conn.CreateCommand();
+        tombCmd.CommandText = """
+            INSERT INTO deleted_sessions (session_id, deleted_at)
+            VALUES ($sessionId, $now)
+            ON CONFLICT(session_id) DO UPDATE SET deleted_at = excluded.deleted_at;
+            """;
+        tombCmd.Parameters.AddWithValue("$sessionId", sessionId);
+        tombCmd.Parameters.AddWithValue("$now", now);
+        tombCmd.ExecuteNonQuery();
+
         if (rows > 0)
         {
             _notifier.NotifyChanged();
             return true;
         }
         return false;
+    }
+
+    public IReadOnlyList<string> GetDeletedSessionIds()
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT session_id
+            FROM deleted_sessions
+            ORDER BY deleted_at DESC
+            LIMIT 500;
+            """;
+
+        var list = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            list.Add(reader.GetString(0));
+        }
+        return list;
     }
 
     public ConversationRecord AddConversation(
@@ -367,6 +407,159 @@ public sealed class HistoryRepository
                 reader.GetInt32(5)));
         }
         return list;
+    }
+
+    public IReadOnlyList<SessionRecord> GetAllSessions(int limit = 100)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT s.session_id,
+                   s.repo,
+                   s.name,
+                   s.created_at,
+                   s.updated_at,
+                   COUNT(c.id) AS conversation_count
+            FROM sessions s
+            LEFT JOIN conversations c ON c.session_id = s.session_id
+            GROUP BY s.session_id, s.repo, s.name, s.created_at, s.updated_at
+            ORDER BY s.updated_at DESC, s.created_at DESC
+            LIMIT $limit;
+            """;
+        cmd.Parameters.AddWithValue("$limit", limit);
+
+        var list = new List<SessionRecord>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            list.Add(new SessionRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetInt32(5)));
+        }
+        return list;
+    }
+
+    public SessionRecord? GetSession(string sessionId)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return null;
+        }
+
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT s.session_id,
+                   s.repo,
+                   s.name,
+                   s.created_at,
+                   s.updated_at,
+                   COUNT(c.id) AS conversation_count
+            FROM sessions s
+            LEFT JOIN conversations c ON c.session_id = s.session_id
+            WHERE s.session_id = $sessionId
+            GROUP BY s.session_id, s.repo, s.name, s.created_at, s.updated_at
+            LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("$sessionId", sessionId.Trim());
+
+        using var reader = cmd.ExecuteReader();
+        if (reader.Read())
+        {
+            return new SessionRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetInt32(5));
+        }
+        return null;
+    }
+
+    public string? ExportSessionJsonl(string sessionId, string? targetCwd = null)
+    {
+        var session = GetSession(sessionId);
+        if (session is null)
+        {
+            return null;
+        }
+
+        var conversations = GetConversations(session.SessionId);
+        var resolvedCwd = !string.IsNullOrWhiteSpace(targetCwd)
+            ? targetCwd.Trim()
+            : (GetRepoPath(session.Repo) ?? "/work");
+
+        var sb = new StringBuilder();
+
+        var sessionHeader = new
+        {
+            type = "session",
+            version = 3,
+            id = session.SessionId,
+            timestamp = session.CreatedAt,
+            cwd = resolvedCwd,
+            title = session.Name,
+            titleSource = "user"
+        };
+        sb.AppendLine(JsonSerializer.Serialize(sessionHeader));
+
+        string? parentId = null;
+        for (var i = 0; i < conversations.Count; i++)
+        {
+            var conv = conversations[i];
+            var turnNum = i + 1;
+            var userEntryId = $"u{turnNum:x7}";
+            var asstEntryId = $"a{turnNum:x7}";
+            var tsMs = DateTimeOffset.TryParse(conv.CreatedAt, out var dto)
+                ? dto.ToUnixTimeMilliseconds()
+                : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            var userEntry = new
+            {
+                type = "message",
+                id = userEntryId,
+                parentId,
+                timestamp = conv.CreatedAt,
+                message = new
+                {
+                    role = "user",
+                    content = new[]
+                    {
+                        new { type = "text", text = conv.Prompt ?? string.Empty }
+                    },
+                    attribution = "user",
+                    timestamp = tsMs
+                }
+            };
+            sb.AppendLine(JsonSerializer.Serialize(userEntry));
+
+            var asstEntry = new
+            {
+                type = "message",
+                id = asstEntryId,
+                parentId = userEntryId,
+                timestamp = conv.CreatedAt,
+                message = new
+                {
+                    role = "assistant",
+                    content = new[]
+                    {
+                        new { type = "text", text = conv.ResponseMd ?? string.Empty }
+                    },
+                    stopReason = "stop",
+                    timestamp = tsMs + 1
+                }
+            };
+            sb.AppendLine(JsonSerializer.Serialize(asstEntry));
+            parentId = asstEntryId;
+        }
+
+        return sb.ToString();
     }
 
     public IReadOnlyList<ConversationRecord> GetConversations(string sessionId)

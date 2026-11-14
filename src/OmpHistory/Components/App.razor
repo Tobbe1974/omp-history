@@ -1,10 +1,15 @@
-﻿<!DOCTYPE html>
+﻿@using Microsoft.AspNetCore.Http
+@inject IHttpContextAccessor HttpContextAccessor
+<!DOCTYPE html>
 <html lang="en">
 
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <base href="/" />
+    @{
+        var pathBase = HttpContextAccessor.HttpContext?.Request.PathBase.Value?.TrimEnd('/') ?? "";
+    }
+    <base href="@(pathBase)/" />
     <ResourcePreloader />
     <link rel="stylesheet" href="@Assets["lib/bootstrap/dist/css/bootstrap.min.css"]" />
     <link rel="stylesheet" href="@Assets["lib/katex/katex.min.css"]" />

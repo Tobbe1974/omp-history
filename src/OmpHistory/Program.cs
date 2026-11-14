@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.AspNetCore.HttpOverrides;
 using OmpHistory.Components;
 using OmpHistory.Data;
 using OmpHistory.Models;
@@ -25,6 +28,7 @@ if (string.IsNullOrWhiteSpace(urls))
     }
 }
 
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<HistoryNotifier>();
 builder.Services.AddSingleton<ActiveSessionTracker>();
 builder.Services.AddSingleton<HistoryRepository>(sp =>
@@ -45,13 +49,71 @@ builder.Services.AddRazorComponents()
 
 var app = builder.Build();
 
+var forwardedHeadersOptions = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+    RequireHeaderSymmetry = false
+};
+forwardedHeadersOptions.KnownIPNetworks.Clear();
+forwardedHeadersOptions.KnownProxies.Clear();
+app.UseForwardedHeaders(forwardedHeadersOptions);
+
+var configuredPathBase = builder.Configuration["PathBase"] ?? Environment.GetEnvironmentVariable("OMP_HISTORY_PATH_BASE");
+if (!string.IsNullOrWhiteSpace(configuredPathBase))
+{
+    var normalizedPathBase = "/" + configuredPathBase.Trim().Trim('/');
+    app.UsePathBase(normalizedPathBase);
+}
+
+app.Use(async (context, next) =>
+{
+    var forwardedPrefix = context.Request.Headers["X-Forwarded-Prefix"].FirstOrDefault();
+    if (!string.IsNullOrWhiteSpace(forwardedPrefix))
+    {
+        context.Request.PathBase = new PathString("/" + forwardedPrefix.Trim().Trim('/'));
+    }
+    await next();
+});
+
+var configuredAuth = (builder.Configuration["BasicAuth"] ?? Environment.GetEnvironmentVariable("OMP_HISTORY_AUTH"))?.Trim();
+if (!string.IsNullOrWhiteSpace(configuredAuth))
+{
+    var expectedCredentials = configuredAuth.Contains(':') ? configuredAuth : $"omp:{configuredAuth}";
+    var expectedBytes = Encoding.UTF8.GetBytes(expectedCredentials);
+
+    app.Use(async (context, next) =>
+    {
+        var authHeader = context.Request.Headers.Authorization.FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(authHeader) && authHeader.StartsWith("Basic ", StringComparison.OrdinalIgnoreCase))
+        {
+            var token = authHeader["Basic ".Length..].Trim();
+            try
+            {
+                var decodedBytes = Convert.FromBase64String(token);
+                if (CryptographicOperations.FixedTimeEquals(decodedBytes, expectedBytes))
+                {
+                    await next();
+                    return;
+                }
+            }
+            catch
+            {
+                // Invalid base64
+            }
+        }
+
+        context.Response.Headers.WWWAuthenticate = "Basic realm=\"OMP History\", charset=\"UTF-8\"";
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await context.Response.WriteAsync("Unauthorized");
+    });
+}
+
 if (!app.Environment.IsDevelopment())
 {
     app.UseExceptionHandler("/Error", createScopeForErrors: true);
 }
 app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
 app.UseAntiforgery();
-
 var api = app.MapGroup("/api");
 
 api.MapGet("/repos", (HistoryRepository repo) =>
@@ -66,7 +128,23 @@ api.MapGet("/sessions", (string? repo, HistoryRepository repository) =>
     {
         return Results.Ok(repository.GetSessionsByRepo(repo));
     }
-    return Results.Ok(Array.Empty<SessionRecord>());
+    return Results.Ok(repository.GetAllSessions());
+});
+
+api.MapGet("/sessions/{sessionId}", (string sessionId, HistoryRepository repo) =>
+{
+    var session = repo.GetSession(sessionId);
+    return session is not null ? Results.Ok(session) : Results.NotFound(new { error = "Session not found" });
+});
+
+api.MapGet("/sessions/{sessionId}/export-jsonl", (string sessionId, string? cwd, HistoryRepository repo) =>
+{
+    var jsonl = repo.ExportSessionJsonl(sessionId, cwd);
+    if (jsonl is null)
+    {
+        return Results.NotFound(new { error = "Session not found" });
+    }
+    return Results.Text(jsonl, "application/x-ndjson", Encoding.UTF8);
 });
 
 api.MapPost("/sessions", (CreateSessionRequest req, HistoryRepository repo, ActiveSessionTracker tracker) =>
@@ -103,6 +181,9 @@ api.MapDelete("/sessions/{sessionId}", (string sessionId, HistoryRepository repo
     var deleted = repo.DeleteSession(sessionId);
     return deleted ? Results.NoContent() : Results.NotFound(new { error = "Session not found" });
 });
+
+api.MapGet("/deleted-sessions", (HistoryRepository repo) =>
+    Results.Ok(repo.GetDeletedSessionIds()));
 
 api.MapGet("/sessions/{sessionId}/conversations", (string sessionId, HistoryRepository repo) =>
     Results.Ok(repo.GetConversations(sessionId)));
@@ -152,7 +233,8 @@ api.MapPost("/sessions/{sessionId}/heartbeat", async (string sessionId, HttpRequ
 
     tracker.RecordHeartbeat(sessionId);
     var items = tracker.DequeuePendingFeedback(sessionId);
-    return Results.Ok(new { sessionId, items });
+    var deletedSessionIds = repo.GetDeletedSessionIds();
+    return Results.Ok(new { sessionId, items, deletedSessionIds });
 });
 
 api.MapGet("/sessions/{sessionId}/feedback/pending", (string sessionId, ActiveSessionTracker tracker) =>

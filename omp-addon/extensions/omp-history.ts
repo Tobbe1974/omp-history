@@ -3,11 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-const DEFAULT_PORT = "5180";
-const DEFAULT_BASE_URL = `http://localhost:${DEFAULT_PORT}`;
 const DEFAULT_PROJECT_DIR = "/mnt/div/Projects/omp-history/src/OmpHistory";
 
-export function resolveBaseUrl(): string {
+export function resolveBaseUrl(): string | undefined {
   const explicitUrl = process.env.OMP_HISTORY_URL?.trim();
   if (explicitUrl) {
     return explicitUrl.replace(/\/+$/, "");
@@ -16,7 +14,120 @@ export function resolveBaseUrl(): string {
   if (port) {
     return `http://localhost:${port}`;
   }
-  return DEFAULT_BASE_URL;
+  return undefined;
+}
+
+export function resolveAuthHeader(): string | undefined {
+  const raw = process.env.OMP_HISTORY_AUTH?.trim();
+  if (!raw) return undefined;
+  const credentials = raw.includes(":") ? raw : `omp:${raw}`;
+  return `Basic ${Buffer.from(credentials, "utf8").toString("base64")}`;
+}
+
+export function buildRequestHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra ?? {}) };
+  const auth = resolveAuthHeader();
+  if (auth) {
+    headers.Authorization = auth;
+  }
+  return headers;
+}
+
+export function encodeSessionDirName(cwd: string): string {
+  let canonical = path.resolve(cwd);
+  try {
+    canonical = fs.realpathSync(canonical);
+  } catch {
+    // ignore if path does not exist
+  }
+  const home = path.resolve(os.homedir());
+  const tmp = path.resolve(os.tmpdir());
+
+  if (canonical === home || canonical.startsWith(home + path.sep)) {
+    const rel = canonical.slice(home.length).replace(/^[\/\\]+/, "");
+    return `-${rel.replace(/[\/\\]/g, "-")}`;
+  }
+  if (canonical === tmp || canonical.startsWith(tmp + path.sep)) {
+    const rel = canonical.slice(tmp.length).replace(/^[\/\\]+/, "");
+    return `-tmp-${rel.replace(/[\/\\]/g, "-")}`;
+  }
+  const trimmed = canonical.replace(/^[\/\\]+|[\/\\]+$/g, "");
+  return `--${trimmed.replace(/[\/\\]/g, "-")}--`;
+}
+
+export function resolveLocalSessionDir(cwd: string, sessionManager?: SessionManagerView): string {
+  try {
+    const currentFile = sessionManager?.getSessionFile?.();
+    if (typeof currentFile === "string" && currentFile.trim().length > 0) {
+      return path.dirname(path.resolve(currentFile));
+    }
+  } catch {
+    // fallback below
+  }
+  const agentDir = process.env.OMP_CODING_AGENT_DIR?.trim() || path.join(os.homedir(), ".omp", "agent");
+  return path.join(agentDir, "sessions", encodeSessionDirName(cwd));
+}
+
+export function purgeDeletedLocalSessionFiles(
+  deletedSessionIds: string[],
+  activeSessionId?: string,
+): number {
+  if (!Array.isArray(deletedSessionIds) || deletedSessionIds.length === 0) return 0;
+
+  const targetIds = new Set(
+    deletedSessionIds
+      .map(id => (typeof id === "string" ? id.trim() : ""))
+      .filter(id => id.length > 0 && id !== activeSessionId),
+  );
+  if (targetIds.size === 0) return 0;
+
+  const agentDir = process.env.OMP_CODING_AGENT_DIR?.trim() || path.join(os.homedir(), ".omp", "agent");
+  const sessionsRoot = path.join(agentDir, "sessions");
+  let removedCount = 0;
+
+  try {
+    if (!fs.existsSync(sessionsRoot)) return 0;
+    const bucketEntries = fs.readdirSync(sessionsRoot, { withFileTypes: true });
+    for (const bucket of bucketEntries) {
+      if (!bucket.isDirectory()) continue;
+      const bucketPath = path.join(sessionsRoot, bucket.name);
+      let files: fs.Dirent[];
+      try {
+        files = fs.readdirSync(bucketPath, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+
+      for (const entry of files) {
+        if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+        const stem = entry.name.slice(0, -".jsonl".length);
+        const underscoreIdx = stem.lastIndexOf("_");
+        const candidateId = underscoreIdx >= 0 ? stem.slice(underscoreIdx + 1) : stem;
+        if (!targetIds.has(candidateId)) continue;
+
+        const jsonlPath = path.join(bucketPath, entry.name);
+        try {
+          fs.unlinkSync(jsonlPath);
+          removedCount++;
+        } catch {
+          // ignore unlink errors
+        }
+
+        const artifactDirPath = path.join(bucketPath, stem);
+        try {
+          if (fs.existsSync(artifactDirPath) && fs.statSync(artifactDirPath).isDirectory()) {
+            fs.rmSync(artifactDirPath, { recursive: true, force: true });
+          }
+        } catch {
+          // ignore artifact dir removal errors
+        }
+      }
+    }
+  } catch {
+    // ignore scan errors
+  }
+
+  return removedCount;
 }
 interface ContentBlock {
   type?: string;
@@ -46,6 +157,7 @@ interface ExtensionUI {
 
 interface SessionManagerView {
   getSessionId?: () => string | undefined;
+  getSessionFile?: () => string | undefined;
   getBranch?: () => SessionEntryRecord[];
 }
 
@@ -56,6 +168,17 @@ interface ExtensionContextView {
   ui?: ExtensionUI;
   sessionManager?: SessionManagerView;
   setInterval?: (fn: () => void, ms: number) => unknown;
+  switchSession?: (sessionPath: string) => Promise<boolean>;
+  waitForIdle?: () => Promise<void>;
+}
+
+interface RemoteSessionSummary {
+  sessionId: string;
+  repo: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  conversationCount: number;
 }
 
 interface InputEventView {
@@ -407,6 +530,7 @@ export async function startOmpHistoryServer(baseUrl: string, cwd?: string): Prom
     try {
       const res = await fetch(probeUrl, {
         method: "GET",
+        headers: buildRequestHeaders(),
         signal: AbortSignal.timeout(1500),
       });
       if (res.ok) {
@@ -425,6 +549,7 @@ export async function startOmpHistoryServer(baseUrl: string, cwd?: string): Prom
 
 export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   let disabled = false;
+  let missingConfigWarned = false;
   let activeSessionId: string | undefined;
   let lastKnownSessionName: string | undefined;
   let lastKnownRepo: string | undefined;
@@ -432,6 +557,20 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   let promptInFlight = false;
   let turnTreeBefore: string | undefined;
 
+  function ensureConfiguredBaseUrl(ctx?: ExtensionContextView): string | undefined {
+    const baseUrl = resolveBaseUrl();
+    if (!baseUrl) {
+      if (!missingConfigWarned) {
+        missingConfigWarned = true;
+        ctx?.ui?.notify?.(
+          "omp-history: OMP_HISTORY_URL (or OMP_HISTORY_PORT) is not configured. Set OMP_HISTORY_URL (and optionally OMP_HISTORY_AUTH) to enable omp-history.",
+          "warning",
+        );
+      }
+      return undefined;
+    }
+    return baseUrl;
+  }
   function readSessionId(ctx: ExtensionContextView): string | undefined {
     try {
       const id = ctx?.sessionManager?.getSessionId?.();
@@ -490,18 +629,27 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   ): Promise<boolean> {
     if (disabled) return false;
 
-    const baseUrl = resolveBaseUrl();
+    const baseUrl = ensureConfiguredBaseUrl(ctx);
+    if (!baseUrl) return false;
     const url = `${baseUrl}${endpointPath}`;
     while (!disabled) {
       try {
         const res = await fetch(url, {
           method,
-          headers: { "Content-Type": "application/json" },
+          headers: buildRequestHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify(payload),
           signal: AbortSignal.timeout(4000),
         });
         if (res.ok) {
           return true;
+        }
+        if (res.status === 401 || res.status === 403) {
+          ctx?.ui?.notify?.(
+            `omp-history authentication failed (${res.status}). Check OMP_HISTORY_AUTH environment variable.`,
+            "error",
+          );
+          disabled = true;
+          return false;
         }
       } catch {
         // handled below
@@ -597,13 +745,14 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     if (!sessionId) return;
 
     const baseUrl = resolveBaseUrl();
+    if (!baseUrl) return;
     const effectiveCwd = ctx?.cwd || process.cwd();
     const repo = resolveRepoName(effectiveCwd);
     const repoPath = resolveRepoRootPath(effectiveCwd);
     try {
       const res = await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/heartbeat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: buildRequestHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ repo, repoPath }),
         signal: AbortSignal.timeout(2500),
       });
@@ -611,9 +760,12 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
       const data = (await res.json()) as {
         items?: Array<{ id?: string; formattedMessage?: string; comment?: string }>;
+        deletedSessionIds?: string[];
       };
+      if (Array.isArray(data?.deletedSessionIds) && data.deletedSessionIds.length > 0) {
+        purgeDeletedLocalSessionFiles(data.deletedSessionIds, sessionId);
+      }
       if (!Array.isArray(data?.items) || data.items.length === 0) return;
-
       for (const item of data.items) {
         const msg = (item?.formattedMessage || item?.comment || "").trim();
         if (!msg) continue;
@@ -637,6 +789,9 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     if (ctx?.agent?.kind && ctx.agent.kind !== "main") return;
+    if (!ensureConfiguredBaseUrl(ctx)) {
+      return;
+    }
     await syncSessionRegistration(ctx);
 
     if (typeof ctx?.setInterval === "function") {
@@ -761,11 +916,174 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     });
   });
 
+  async function handleResumeFromHistory(argText: string, ctx: ExtensionContextView): Promise<void> {
+    const baseUrl = ensureConfiguredBaseUrl(ctx);
+    if (!baseUrl) return;
+
+    const effectiveCwd = ctx?.cwd || process.cwd();
+    const currentRepo = resolveRepoName(effectiveCwd);
+    const localRepoRoot = resolveRepoRootPath(effectiveCwd);
+    let targetSessionId = argText.trim();
+    let targetCreatedAt: string | undefined;
+    let targetName: string | undefined;
+
+    try {
+      let sessions: RemoteSessionSummary[] = [];
+      const repoRes = await fetch(`${baseUrl}/api/repos/${encodeURIComponent(currentRepo)}/sessions`, {
+        method: "GET",
+        headers: buildRequestHeaders(),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (repoRes.status === 401 || repoRes.status === 403) {
+        ctx.ui?.notify?.(`omp-history authentication failed (${repoRes.status}). Check OMP_HISTORY_AUTH.`, "error");
+        return;
+      }
+      if (repoRes.ok) {
+        sessions = (await repoRes.json()) as RemoteSessionSummary[];
+      }
+
+      if (!Array.isArray(sessions) || sessions.length === 0) {
+        const allRes = await fetch(`${baseUrl}/api/sessions`, {
+          method: "GET",
+          headers: buildRequestHeaders(),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (allRes.ok) {
+          sessions = (await allRes.json()) as RemoteSessionSummary[];
+        }
+      }
+
+      if (targetSessionId) {
+        const matched = sessions.find(
+          s =>
+            s.sessionId.toLowerCase() === targetSessionId.toLowerCase() ||
+            s.sessionId.toLowerCase().startsWith(targetSessionId.toLowerCase()),
+        );
+        if (matched) {
+          targetSessionId = matched.sessionId;
+          targetCreatedAt = matched.createdAt;
+          targetName = matched.name;
+        }
+      } else {
+        if (!sessions || sessions.length === 0) {
+          ctx.ui?.notify?.(`No sessions found on omp-history (${baseUrl}).`, "warning");
+          return;
+        }
+        if (!ctx?.hasUI || typeof ctx?.ui?.select !== "function") {
+          ctx.ui?.notify?.("Usage: /omp-history resume <sessionId>", "warning");
+          return;
+        }
+
+        const options = sessions.map(
+          s => `${s.name} [${s.repo}] (${s.conversationCount} turns) — ${s.sessionId}`,
+        );
+        const picked = await ctx.ui.select(
+          `Resume session from omp-history (${currentRepo})`,
+          options,
+        );
+        if (!picked) return;
+
+        const pickedIdx = options.indexOf(picked);
+        const selected = pickedIdx >= 0 ? sessions[pickedIdx] : undefined;
+        if (!selected) return;
+        targetSessionId = selected.sessionId;
+        targetCreatedAt = selected.createdAt;
+        targetName = selected.name;
+      }
+
+      const exportUrl = `${baseUrl}/api/sessions/${encodeURIComponent(targetSessionId)}/export-jsonl?cwd=${encodeURIComponent(localRepoRoot)}`;
+      const exportRes = await fetch(exportUrl, {
+        method: "GET",
+        headers: buildRequestHeaders(),
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!exportRes.ok) {
+        ctx.ui?.notify?.(
+          `Could not fetch session "${targetSessionId}" from omp-history (HTTP ${exportRes.status}).`,
+          "error",
+        );
+        return;
+      }
+
+      const jsonl = await exportRes.text();
+      if (!jsonl.trim()) {
+        ctx.ui?.notify?.(`Session "${targetSessionId}" returned empty transcript.`, "error");
+        return;
+      }
+
+      const sessionDir = resolveLocalSessionDir(localRepoRoot, ctx?.sessionManager);
+      fs.mkdirSync(sessionDir, { recursive: true });
+
+      let targetFilePath: string | undefined;
+      try {
+        const existingFiles = fs.readdirSync(sessionDir);
+        const existingMatch = existingFiles.find(
+          f => f.endsWith(`_${targetSessionId}.jsonl`) || f === `${targetSessionId}.jsonl`,
+        );
+        if (existingMatch) {
+          targetFilePath = path.join(sessionDir, existingMatch);
+        }
+      } catch {
+        // ignore
+      }
+
+      if (!targetFilePath) {
+        const iso = (targetCreatedAt || new Date().toISOString()).replace(/[:.]/g, "-");
+        targetFilePath = path.join(sessionDir, `${iso}_${targetSessionId}.jsonl`);
+      }
+
+      fs.writeFileSync(targetFilePath, jsonl, "utf8");
+
+      if (typeof ctx.waitForIdle === "function") {
+        await ctx.waitForIdle();
+      }
+
+      if (typeof ctx.switchSession === "function") {
+        const switched = await ctx.switchSession(targetFilePath);
+        if (switched) {
+          disabled = false;
+          await syncSessionRegistration(ctx);
+          ctx.ui?.notify?.(
+            `Resumed session "${targetName || targetSessionId}" (${targetSessionId.slice(0, 8)}) from omp-history.`,
+            "info",
+          );
+        } else {
+          ctx.ui?.notify?.(
+            `Downloaded session to ${targetFilePath}, but switching session was cancelled or rejected.`,
+            "warning",
+          );
+        }
+      } else {
+        ctx.ui?.notify?.(
+          `Downloaded session to ${targetFilePath}. Run: omp --resume ${targetSessionId}`,
+          "info",
+        );
+      }
+    } catch (err) {
+      ctx.ui?.notify?.(
+        `Failed to resume session from omp-history: ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+      );
+    }
+  }
+
   pi.registerCommand("omp-history", {
-    description: "Start, enable, disable, or check status of omp-history logging (/omp-history [start|enable|disable|status])",
+    description:
+      "Manage omp-history logging or resume remote sessions (/omp-history [resume [id]|start|enable|disable|status])",
     handler: async (args, ctx) => {
-      const sub = (args || "").trim().toLowerCase();
-      const baseUrl = resolveBaseUrl();
+      const rawArgs = (args || "").trim();
+      const [subRaw, ...rest] = rawArgs.split(/\s+/);
+      const sub = (subRaw || "").toLowerCase();
+      const restArgs = rest.join(" ").trim();
+
+      if (sub === "resume") {
+        await handleResumeFromHistory(restArgs, ctx);
+        return;
+      }
+
+      const baseUrl = ensureConfiguredBaseUrl(ctx);
+      if (!baseUrl) return;
+
       if (sub === "start") {
         disabled = false;
         ctx.ui?.notify?.("Starting omp-history server...", "info");
@@ -790,7 +1108,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
         return;
       }
       ctx.ui?.notify?.(
-        `omp-history: ${disabled ? "disabled" : "enabled"} (url=${baseUrl}, repo=${resolveRepoName(ctx?.cwd || process.cwd())})`,
+        `omp-history: ${disabled ? "disabled" : "enabled"} (url=${baseUrl}, auth=${resolveAuthHeader() ? "configured" : "none"}, repo=${resolveRepoName(ctx?.cwd || process.cwd())})`,
         "info",
       );
     },

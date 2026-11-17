@@ -424,6 +424,70 @@ export function extractTextFromContent(content: unknown): string {
   return parts.join("\n\n").trim();
 }
 
+export function extractTurnFromEventMessages(
+  messages: SessionEntryRecord[],
+): { prompt: string; responseMd: string; aborted?: boolean } | undefined {
+  if (!Array.isArray(messages) || messages.length === 0) return undefined;
+
+  const userPrompts: string[] = [];
+  let lastUserIdx = -1;
+
+  for (let i = 0; i < messages.length; i++) {
+    const msgRaw = messages[i];
+    const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
+    if (msg?.role === "user") {
+      lastUserIdx = i;
+      const text = extractTextFromContent(msg?.content);
+      if (text) {
+        userPrompts.push(text);
+      }
+    }
+  }
+
+  const prompt = userPrompts.join("\n\n").trim();
+  if (!prompt || lastUserIdx < 0) return undefined;
+
+  for (let i = messages.length - 1; i > lastUserIdx; i--) {
+    const msgRaw = messages[i];
+    const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
+    if (msg?.role === "assistant") {
+      if (msg.stopReason === "aborted" || msg.stopReason === "error") {
+        return { prompt, responseMd: "", aborted: true };
+      }
+      break;
+    }
+  }
+
+  const assistantResponses: string[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msgRaw = messages[i];
+    const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
+    if (msg?.role === "assistant" && msg.stopReason === "stop") {
+      const text = extractTextFromContent(msg?.content);
+      if (text) {
+        assistantResponses.push(text);
+      }
+    }
+  }
+
+  if (assistantResponses.length > 0) {
+    return { prompt, responseMd: assistantResponses.join("\n\n").trim() };
+  }
+
+  for (let i = messages.length - 1; i > lastUserIdx; i--) {
+    const msgRaw = messages[i];
+    const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
+    if (msg?.role === "assistant") {
+      const text = extractTextFromContent(msg?.content);
+      if (text) {
+        return { prompt, responseMd: text };
+      }
+    }
+  }
+
+  return undefined;
+}
+
 export function extractLatestTurnFromMessages(
   messages: SessionEntryRecord[],
 ): { prompt: string; responseMd: string; aborted?: boolean } | undefined {
@@ -441,27 +505,18 @@ export function extractLatestTurnFromMessages(
 
   if (lastUserIdx < 0) return undefined;
 
-  const userMsgRaw = messages[lastUserIdx];
-  const userMsg = userMsgRaw?.type === "message" && userMsgRaw?.message ? userMsgRaw.message : userMsgRaw;
-  const prompt = extractTextFromContent(userMsg?.content);
-  if (!prompt) return undefined;
-
-  // Check if the final assistant message in this turn was aborted or errored
-  for (let i = messages.length - 1; i > lastUserIdx; i--) {
+  // Find the start of this turn (after the previous completed assistant turn with stopReason === "stop")
+  let turnStartIdx = 0;
+  for (let i = lastUserIdx - 1; i >= 0; i--) {
     const msgRaw = messages[i];
     const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
-    if (msg?.role === "assistant") {
-      if (msg.stopReason === "aborted" || msg.stopReason === "error") {
-        return { prompt, responseMd: "", aborted: true };
-      }
-      const text = extractTextFromContent(msg?.content);
-      if (text) {
-        return { prompt, responseMd: text };
-      }
+    if (msg?.role === "assistant" && msg.stopReason === "stop") {
+      turnStartIdx = i + 1;
+      break;
     }
   }
 
-  return undefined;
+  return extractTurnFromEventMessages(messages.slice(turnStartIdx));
 }
 
 export function resolveServerProjectDir(cwd?: string): string | undefined {
@@ -554,6 +609,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   let lastKnownSessionName: string | undefined;
   let lastKnownRepo: string | undefined;
   let latestUserPrompt: string | undefined;
+  let pendingTurnPrompts: string[] = [];
   let promptInFlight = false;
   let turnTreeBefore: string | undefined;
 
@@ -771,8 +827,11 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
         if (!msg) continue;
 
         latestUserPrompt = msg;
+        pendingTurnPrompts.push(msg);
         promptInFlight = true;
-        turnTreeBefore = captureGitTreeSnapshot(effectiveCwd);
+        if (!turnTreeBefore) {
+          turnTreeBefore = captureGitTreeSnapshot(effectiveCwd);
+        }
 
         if (typeof pi.sendUserMessage === "function") {
           pi.sendUserMessage(msg);
@@ -805,6 +864,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   pi.on("session_switch", async (_event, ctx) => {
     if (ctx?.agent?.kind && ctx.agent.kind !== "main") return;
     latestUserPrompt = undefined;
+    pendingTurnPrompts = [];
     promptInFlight = false;
     turnTreeBefore = undefined;
     await syncSessionRegistration(ctx);
@@ -835,19 +895,27 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
     if (!text.startsWith("/")) {
       latestUserPrompt = text;
+      if (!turnTreeBefore) {
+        turnTreeBefore = captureGitTreeSnapshot(ctx?.cwd || process.cwd());
+      }
       promptInFlight = true;
-      turnTreeBefore = captureGitTreeSnapshot(ctx?.cwd || process.cwd());
     }
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
     if (ctx?.agent?.kind && ctx.agent.kind !== "main") return;
     if (typeof event?.prompt === "string" && event.prompt.trim().length > 0) {
-      latestUserPrompt = event.prompt
+      const cleaned = event.prompt
         .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "")
         .replace(/<system-notice>[\s\S]*?<\/system-notice>/g, "")
         .trim();
-      promptInFlight = true;
+      if (cleaned) {
+        latestUserPrompt = cleaned;
+        if (pendingTurnPrompts[pendingTurnPrompts.length - 1] !== cleaned) {
+          pendingTurnPrompts.push(cleaned);
+        }
+        promptInFlight = true;
+      }
     }
     if (!turnTreeBefore) {
       turnTreeBefore = captureGitTreeSnapshot(ctx?.cwd || process.cwd());
@@ -866,9 +934,10 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     const eventMessages = Array.isArray(event?.messages) ? event.messages : [];
     const branchEntries = ctx?.sessionManager?.getBranch?.() ?? [];
 
-    const fromEvent = extractLatestTurnFromMessages(eventMessages);
+    const fromEvent = extractTurnFromEventMessages(eventMessages);
     if (fromEvent?.aborted) {
       promptInFlight = false;
+      pendingTurnPrompts = [];
       turnTreeBefore = undefined;
       return;
     }
@@ -876,22 +945,29 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     const fromBranch = !fromEvent ? extractLatestTurnFromMessages(branchEntries) : undefined;
     if (fromBranch?.aborted) {
       promptInFlight = false;
+      pendingTurnPrompts = [];
       turnTreeBefore = undefined;
       return;
     }
 
-    const prompt = fromEvent?.prompt ?? fromBranch?.prompt;
+    const combinedPendingPrompt = pendingTurnPrompts.join("\n\n").trim();
+    const extractedPrompt = fromEvent?.prompt ?? fromBranch?.prompt;
+    const prompt =
+      combinedPendingPrompt.length > (extractedPrompt?.length ?? 0)
+        ? combinedPendingPrompt
+        : extractedPrompt;
     const responseMd = fromEvent?.responseMd ?? fromBranch?.responseMd;
 
     if (!prompt || !responseMd) {
       promptInFlight = false;
+      pendingTurnPrompts = [];
       turnTreeBefore = undefined;
       return;
     }
     if (!promptInFlight && !fromEvent) return;
 
     promptInFlight = false;
-
+    pendingTurnPrompts = [];
     const effectiveCwd = ctx?.cwd || process.cwd();
     const repo = lastKnownRepo ?? resolveRepoName(effectiveCwd);
     const repoPath = resolveRepoRootPath(effectiveCwd);

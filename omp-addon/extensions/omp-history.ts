@@ -161,11 +161,20 @@ interface SessionManagerView {
   getBranch?: () => SessionEntryRecord[];
 }
 
+interface ModelInfoView {
+  provider?: string;
+  id?: string;
+}
+
 interface ExtensionContextView {
   hasUI?: boolean;
   cwd?: string;
   agent?: { kind?: string };
   ui?: ExtensionUI;
+  model?: ModelInfoView;
+  models?: {
+    current?: () => ModelInfoView | undefined;
+  };
   sessionManager?: SessionManagerView;
   setInterval?: (fn: () => void, ms: number) => unknown;
   switchSession?: (sessionPath: string) => Promise<boolean>;
@@ -1067,7 +1076,20 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
         targetName = selected.name;
       }
 
-      const exportUrl = `${baseUrl}/api/sessions/${encodeURIComponent(targetSessionId)}/export-jsonl?cwd=${encodeURIComponent(localRepoRoot)}`;
+      let currentModelSpec = "";
+      try {
+        const m = ctx?.models?.current?.() ?? ctx?.model;
+        if (m?.provider && m?.id) {
+          currentModelSpec = `${m.provider}/${m.id}`;
+        } else if (m?.id) {
+          currentModelSpec = m.id;
+        }
+      } catch {
+        // ignore
+      }
+
+      const modelQuery = currentModelSpec ? `&model=${encodeURIComponent(currentModelSpec)}` : "";
+      const exportUrl = `${baseUrl}/api/sessions/${encodeURIComponent(targetSessionId)}/export-jsonl?cwd=${encodeURIComponent(localRepoRoot)}${modelQuery}`;
       const exportRes = await fetch(exportUrl, {
         method: "GET",
         headers: buildRequestHeaders(),

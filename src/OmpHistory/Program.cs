@@ -137,9 +137,9 @@ api.MapGet("/sessions/{sessionId}", (string sessionId, HistoryRepository repo) =
     return session is not null ? Results.Ok(session) : Results.NotFound(new { error = "Session not found" });
 });
 
-api.MapGet("/sessions/{sessionId}/export-jsonl", (string sessionId, string? cwd, HistoryRepository repo) =>
+api.MapGet("/sessions/{sessionId}/export-jsonl", (string sessionId, string? cwd, string? model, HistoryRepository repo) =>
 {
-    var jsonl = repo.ExportSessionJsonl(sessionId, cwd);
+    var jsonl = repo.ExportSessionJsonl(sessionId, cwd, model);
     if (jsonl is null)
     {
         return Results.NotFound(new { error = "Session not found" });

@@ -481,7 +481,7 @@ public sealed class HistoryRepository
         return null;
     }
 
-    public string? ExportSessionJsonl(string sessionId, string? targetCwd = null)
+    public string? ExportSessionJsonl(string sessionId, string? targetCwd = null, string? model = null)
     {
         var session = GetSession(sessionId);
         if (session is null)
@@ -493,6 +493,22 @@ public sealed class HistoryRepository
         var resolvedCwd = !string.IsNullOrWhiteSpace(targetCwd)
             ? targetCwd.Trim()
             : (GetRepoPath(session.Repo) ?? "/work");
+        var normalizedModel = !string.IsNullOrWhiteSpace(model) ? model.Trim() : null;
+        string? providerPart = null;
+        string? modelIdPart = null;
+        if (!string.IsNullOrWhiteSpace(normalizedModel))
+        {
+            var slashIdx = normalizedModel.IndexOf('/');
+            if (slashIdx > 0 && slashIdx < normalizedModel.Length - 1)
+            {
+                providerPart = normalizedModel[..slashIdx];
+                modelIdPart = normalizedModel[(slashIdx + 1)..];
+            }
+            else
+            {
+                modelIdPart = normalizedModel;
+            }
+        }
 
         var sb = new StringBuilder();
 
@@ -509,6 +525,23 @@ public sealed class HistoryRepository
         sb.AppendLine(JsonSerializer.Serialize(sessionHeader));
 
         string? parentId = null;
+        if (!string.IsNullOrWhiteSpace(normalizedModel))
+        {
+            var modelChangeId = "m0000001";
+            var modelChangeEntry = new
+            {
+                type = "model_change",
+                id = modelChangeId,
+                parentId,
+                timestamp = session.CreatedAt,
+                model = normalizedModel,
+                role = "default",
+                resolvedModelIsFallback = false
+            };
+            sb.AppendLine(JsonSerializer.Serialize(modelChangeEntry));
+            parentId = modelChangeId;
+        }
+
         for (var i = 0; i < conversations.Count; i++)
         {
             var conv = conversations[i];
@@ -538,13 +571,20 @@ public sealed class HistoryRepository
             };
             sb.AppendLine(JsonSerializer.Serialize(userEntry));
 
-            var asstEntry = new
-            {
-                type = "message",
-                id = asstEntryId,
-                parentId = userEntryId,
-                timestamp = conv.CreatedAt,
-                message = new
+            object asstMessage = (!string.IsNullOrWhiteSpace(providerPart) && !string.IsNullOrWhiteSpace(modelIdPart))
+                ? new
+                {
+                    role = "assistant",
+                    provider = providerPart,
+                    model = modelIdPart,
+                    content = new[]
+                    {
+                        new { type = "text", text = conv.ResponseMd ?? string.Empty }
+                    },
+                    stopReason = "stop",
+                    timestamp = tsMs + 1
+                }
+                : new
                 {
                     role = "assistant",
                     content = new[]
@@ -553,7 +593,15 @@ public sealed class HistoryRepository
                     },
                     stopReason = "stop",
                     timestamp = tsMs + 1
-                }
+                };
+
+            var asstEntry = new
+            {
+                type = "message",
+                id = asstEntryId,
+                parentId = userEntryId,
+                timestamp = conv.CreatedAt,
+                message = asstMessage
             };
             sb.AppendLine(JsonSerializer.Serialize(asstEntry));
             parentId = asstEntryId;

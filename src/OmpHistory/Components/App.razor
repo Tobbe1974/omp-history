@@ -117,13 +117,162 @@
         window.ompHistoryCaptureSelection = function () {
             const sel = window.getSelection();
             const text = sel ? sel.toString().trim() : '';
+            let locationContext = '';
+
+            try {
+                if (sel && sel.rangeCount > 0) {
+                    const range = sel.getRangeAt(0);
+                    const startEl = range.startContainer.nodeType === Node.ELEMENT_NODE
+                        ? range.startContainer
+                        : range.startContainer.parentElement;
+                    const endEl = range.endContainer.nodeType === Node.ELEMENT_NODE
+                        ? range.endContainer
+                        : range.endContainer.parentElement;
+
+                    if (startEl) {
+                        // 1. Check if selection is inside a diff2html file block
+                        const d2hWrapper = startEl.closest('.d2h-file-wrapper');
+                        if (d2hWrapper) {
+                            const fileNameEl = d2hWrapper.querySelector('.d2h-file-name');
+                            const fileName = fileNameEl ? fileNameEl.textContent.trim() : 'Diff';
+
+                            const extractLineNum = (el) => {
+                                if (!el) return null;
+                                const tr = el.closest('tr');
+                                if (!tr) return null;
+                                const num2 = tr.querySelector('.line-num2');
+                                const num1 = tr.querySelector('.line-num1');
+                                const sideTd = el.closest('td');
+                                if (num2 && num2.textContent.trim()) return num2.textContent.trim();
+                                if (num1 && num1.textContent.trim()) return num1.textContent.trim() + ' (old)';
+                                const lineTd = tr.querySelector('.d2h-code-linenumber, .d2h-code-side-linenumber');
+                                if (lineTd) {
+                                    const nums = lineTd.textContent.trim().split(/\s+/).filter(Boolean);
+                                    if (nums.length > 0) return nums[nums.length - 1];
+                                }
+                                if (sideTd && sideTd.previousElementSibling && sideTd.previousElementSibling.classList.contains('d2h-code-side-linenumber')) {
+                                    const n = sideTd.previousElementSibling.textContent.trim();
+                                    if (n) return n;
+                                }
+                                return null;
+                            };
+
+                            const startLine = extractLineNum(startEl);
+                            const endLine = extractLineNum(endEl);
+                            if (startLine && endLine && startLine !== endLine) {
+                                locationContext = `File: ${fileName} (lines ${startLine}–${endLine})`;
+                            } else if (startLine) {
+                                locationContext = `File: ${fileName} (line ${startLine})`;
+                            } else {
+                                locationContext = `File: ${fileName}`;
+                            }
+                        }
+                        // 2. Check if selection is inside user prompt box
+                        else if (startEl.closest('.prompt-section')) {
+                            locationContext = 'User Prompt';
+                        }
+                        // 3. Check if selection is inside Markdown response
+                        else {
+                            const mdBody = startEl.closest('.markdown-body');
+                            if (mdBody && text) {
+                                const parts = [];
+
+                                // Find nearest preceding heading (h1-h6)
+                                const headings = Array.from(mdBody.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+                                let currentHeading = null;
+                                for (const h of headings) {
+                                    const cmp = range.comparePoint(h, 0);
+                                    if (cmp >= 0 || h.contains(startEl)) {
+                                        currentHeading = h.textContent.trim();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if (currentHeading) {
+                                    parts.push(`Section "${currentHeading}"`);
+                                }
+
+                                // Check if inside a fenced code block <pre><code>
+                                const preEl = startEl.closest('pre');
+                                if (preEl && mdBody.contains(preEl)) {
+                                    const codeEl = preEl.querySelector('code');
+                                    let lang = '';
+                                    if (codeEl && codeEl.className) {
+                                        const m = codeEl.className.match(/language-([\w-]+)/);
+                                        if (m) lang = m[1];
+                                    }
+                                    try {
+                                        const preRange = document.createRange();
+                                        preRange.selectNodeContents(preEl);
+                                        preRange.setEnd(range.startContainer, range.startOffset);
+                                        const prefixText = preRange.toString();
+                                        const startLine = prefixText.split('\n').length;
+                                        const selectedLines = text.split('\n').length;
+                                        const endLine = startLine + selectedLines - 1;
+                                        const codeLabel = lang ? `Code block (${lang})` : 'Code block';
+                                        if (endLine > startLine) {
+                                            parts.push(`${codeLabel} lines ${startLine}–${endLine}`);
+                                        } else {
+                                            parts.push(`${codeLabel} line ${startLine}`);
+                                        }
+                                    } catch {
+                                        parts.push(lang ? `Code block (${lang})` : 'Code block');
+                                    }
+                                } else {
+                                    // Compute line number and occurrence index within the response text
+                                    try {
+                                        const fullText = mdBody.innerText || mdBody.textContent || '';
+                                        const prefixRange = document.createRange();
+                                        prefixRange.selectNodeContents(mdBody);
+                                        prefixRange.setEnd(range.startContainer, range.startOffset);
+                                        const beforeText = prefixRange.toString();
+                                        const approxLine = beforeText.split('\n').length;
+                                        if (approxLine > 0) {
+                                            parts.push(`line ~${approxLine}`);
+                                        }
+
+                                        if (text.length >= 2 && text.length <= 200 && fullText) {
+                                            let totalMatches = 0;
+                                            let idx = 0;
+                                            while ((idx = fullText.indexOf(text, idx)) !== -1) {
+                                                totalMatches++;
+                                                idx += text.length;
+                                            }
+                                            if (totalMatches > 1) {
+                                                let priorMatches = 0;
+                                                let pIdx = 0;
+                                                while ((pIdx = beforeText.indexOf(text, pIdx)) !== -1) {
+                                                    priorMatches++;
+                                                    pIdx += text.length;
+                                                }
+                                                const occNum = Math.min(priorMatches + 1, totalMatches);
+                                                parts.push(`occurrence ${occNum} of ${totalMatches}`);
+                                            }
+                                        }
+                                    } catch {
+                                        // ignore range offset errors
+                                    }
+                                }
+
+                                if (parts.length > 0) {
+                                    locationContext = parts.join(', ');
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn('Selection context capture error:', err);
+            }
+
             setTimeout(() => {
                 const textarea = document.getElementById('word-comment-textarea');
                 if (textarea) {
                     textarea.focus();
                 }
             }, 50);
-            return text;
+
+            return { text: text, locationContext: locationContext };
         };
 
         window.ompHistoryRenderGitDiff = function (elementId, rawDiff, outputFormat, drawFileList) {

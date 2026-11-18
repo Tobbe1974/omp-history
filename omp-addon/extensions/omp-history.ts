@@ -134,9 +134,30 @@ interface ContentBlock {
   text?: string;
 }
 
+interface UsageCostView {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  total?: number;
+}
+
+interface MessageUsageView {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  totalTokens?: number;
+  cost?: UsageCostView;
+  premiumRequests?: number;
+}
+
 interface RoleMessage {
   role?: string;
   stopReason?: string;
+  provider?: string;
+  model?: string;
+  usage?: MessageUsageView;
   content?: unknown;
 }
 
@@ -146,8 +167,28 @@ interface SessionEntryRecord {
   title?: string;
   role?: string;
   stopReason?: string;
+  provider?: string;
+  model?: string;
+  usage?: MessageUsageView;
   content?: unknown;
   message?: RoleMessage;
+}
+
+export interface TurnUsageMetrics {
+  creditsUsed?: number;
+  costUsd?: number;
+  totalTokens?: number;
+  model?: string;
+}
+
+export interface CopilotQuotaSnapshot {
+  creditsUsed: number;
+  remaining: number;
+  entitlement: number;
+  percentRemaining: number;
+  resetDate?: string;
+  plan?: string;
+  updatedAt?: string;
 }
 
 interface ExtensionUI {
@@ -433,73 +474,122 @@ export function extractTextFromContent(content: unknown): string {
   return parts.join("\n\n").trim();
 }
 
-export function extractTurnFromEventMessages(
-  messages: SessionEntryRecord[],
-): { prompt: string; responseMd: string; aborted?: boolean } | undefined {
-  if (!Array.isArray(messages) || messages.length === 0) return undefined;
+export function extractUsageMetricsFromMessages(messages: SessionEntryRecord[]): TurnUsageMetrics {
+  let totalCostUsd = 0;
+  let hasCost = false;
+  let totalTokens = 0;
+  let hasTokens = false;
+  let modelName: string | undefined;
 
-  const userPrompts: string[] = [];
-  let lastUserIdx = -1;
-
-  for (let i = 0; i < messages.length; i++) {
-    const msgRaw = messages[i];
+  for (const msgRaw of messages) {
     const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
-    if (msg?.role === "user") {
-      lastUserIdx = i;
-      const text = extractTextFromContent(msg?.content);
-      if (text) {
-        userPrompts.push(text);
+    if (msg?.role !== "assistant") continue;
+
+    if (typeof msg.model === "string" && msg.model.trim()) {
+      modelName = msg.provider ? `${msg.provider}/${msg.model}` : msg.model.trim();
+    }
+
+    const usage = msg.usage;
+    if (!usage) continue;
+
+    if (typeof usage.totalTokens === "number" && Number.isFinite(usage.totalTokens) && usage.totalTokens > 0) {
+      totalTokens += usage.totalTokens;
+      hasTokens = true;
+    } else {
+      const sumTok =
+        (typeof usage.input === "number" ? usage.input : 0) +
+        (typeof usage.output === "number" ? usage.output : 0) +
+        (typeof usage.cacheRead === "number" ? usage.cacheRead : 0) +
+        (typeof usage.cacheWrite === "number" ? usage.cacheWrite : 0);
+      if (sumTok > 0) {
+        totalTokens += sumTok;
+        hasTokens = true;
       }
+    }
+
+    const costTotal = usage.cost?.total;
+    if (typeof costTotal === "number" && Number.isFinite(costTotal) && costTotal >= 0) {
+      totalCostUsd += costTotal;
+      hasCost = true;
     }
   }
 
-  const prompt = userPrompts.join("\n\n").trim();
-  if (!prompt || lastUserIdx < 0) return undefined;
+  // GitHub Copilot token-based billing converts $0.004 of model token cost into 1 AI credit (~250 credits per $1 USD)
+  const creditsUsed = hasCost ? Math.round(totalCostUsd * 250 * 10) / 10 : undefined;
+  const costUsd = hasCost ? Math.round(totalCostUsd * 1_000_000) / 1_000_000 : undefined;
 
-  for (let i = messages.length - 1; i > lastUserIdx; i--) {
-    const msgRaw = messages[i];
-    const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
-    if (msg?.role === "assistant") {
-      if (msg.stopReason === "aborted" || msg.stopReason === "error") {
-        return { prompt, responseMd: "", aborted: true };
-      }
-      break;
+  return {
+    creditsUsed,
+    costUsd,
+    totalTokens: hasTokens ? totalTokens : undefined,
+    model: modelName,
+  };
+}
+
+export function fetchCopilotQuotaSnapshot(): CopilotQuotaSnapshot | undefined {
+  try {
+    const res = spawnSync("gh", ["api", "/copilot_internal/user"], {
+      encoding: "utf8",
+      timeout: 3500,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    if (res.status !== 0 || !res.stdout) return undefined;
+
+    const parsed = JSON.parse(res.stdout) as {
+      copilot_plan?: string;
+      quota_reset_date?: string;
+      quota_snapshots?: {
+        premium_interactions?: {
+          credits_used?: number;
+          quota_remaining?: number;
+          remaining?: number;
+          entitlement?: number;
+          percent_remaining?: number;
+          timestamp_utc?: string;
+        };
+      };
+    };
+
+    const prem = parsed?.quota_snapshots?.premium_interactions;
+    if (!prem || typeof prem.entitlement !== "number" || prem.entitlement <= 0) {
+      return undefined;
     }
-  }
 
-  const assistantResponses: string[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    const msgRaw = messages[i];
-    const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
-    if (msg?.role === "assistant" && msg.stopReason === "stop") {
-      const text = extractTextFromContent(msg?.content);
-      if (text) {
-        assistantResponses.push(text);
-      }
-    }
-  }
+    const entitlement = prem.entitlement;
+    const remaining =
+      typeof prem.quota_remaining === "number"
+        ? prem.quota_remaining
+        : typeof prem.remaining === "number"
+          ? prem.remaining
+          : 0;
+    const creditsUsed =
+      typeof prem.credits_used === "number"
+        ? prem.credits_used
+        : typeof prem.quota_remaining === "number"
+          ? Math.max(0, Math.round((entitlement - prem.quota_remaining) * 10) / 10)
+          : Math.max(0, Math.round((entitlement - remaining) * 10) / 10);
+    const percentRemaining =
+      typeof prem.percent_remaining === "number"
+        ? prem.percent_remaining
+        : Math.round((remaining / entitlement) * 1000) / 10;
 
-  if (assistantResponses.length > 0) {
-    return { prompt, responseMd: assistantResponses.join("\n\n").trim() };
+    return {
+      creditsUsed,
+      remaining,
+      entitlement,
+      percentRemaining,
+      resetDate: parsed.quota_reset_date,
+      plan: parsed.copilot_plan,
+      updatedAt: prem.timestamp_utc || new Date().toISOString(),
+    };
+  } catch {
+    return undefined;
   }
-
-  for (let i = messages.length - 1; i > lastUserIdx; i--) {
-    const msgRaw = messages[i];
-    const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
-    if (msg?.role === "assistant") {
-      const text = extractTextFromContent(msg?.content);
-      if (text) {
-        return { prompt, responseMd: text };
-      }
-    }
-  }
-
-  return undefined;
 }
 
 export function extractLatestTurnFromMessages(
   messages: SessionEntryRecord[],
-): { prompt: string; responseMd: string; aborted?: boolean } | undefined {
+): ({ prompt: string; responseMd: string; aborted?: boolean } & TurnUsageMetrics) | undefined {
   if (!Array.isArray(messages) || messages.length === 0) return undefined;
 
   let lastUserIdx = -1;
@@ -514,18 +604,48 @@ export function extractLatestTurnFromMessages(
 
   if (lastUserIdx < 0) return undefined;
 
-  // Find the start of this turn (after the previous completed assistant turn with stopReason === "stop")
-  let turnStartIdx = 0;
-  for (let i = lastUserIdx - 1; i >= 0; i--) {
+  const userMsgRaw = messages[lastUserIdx];
+  const userMsg = userMsgRaw?.type === "message" && userMsgRaw?.message ? userMsgRaw.message : userMsgRaw;
+  const prompt = extractTextFromContent(userMsg?.content);
+  if (!prompt) return undefined;
+
+  for (let i = messages.length - 1; i > lastUserIdx; i--) {
     const msgRaw = messages[i];
     const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
-    if (msg?.role === "assistant" && msg.stopReason === "stop") {
-      turnStartIdx = i + 1;
+    if (msg?.role === "assistant") {
+      if (msg.stopReason === "aborted" || msg.stopReason === "error") {
+        return { prompt, responseMd: "", aborted: true };
+      }
       break;
     }
   }
 
-  return extractTurnFromEventMessages(messages.slice(turnStartIdx));
+  const turnAssistantMessages = messages.slice(lastUserIdx + 1);
+  const usageMetrics = extractUsageMetricsFromMessages(turnAssistantMessages);
+
+  for (let i = messages.length - 1; i > lastUserIdx; i--) {
+    const msgRaw = messages[i];
+    const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
+    if (msg?.role === "assistant" && msg.stopReason === "stop") {
+      const text = extractTextFromContent(msg?.content);
+      if (text) {
+        return { prompt, responseMd: text, ...usageMetrics };
+      }
+    }
+  }
+
+  for (let i = messages.length - 1; i > lastUserIdx; i--) {
+    const msgRaw = messages[i];
+    const msg = msgRaw?.type === "message" && msgRaw?.message ? msgRaw.message : msgRaw;
+    if (msg?.role === "assistant") {
+      const text = extractTextFromContent(msg?.content);
+      if (text) {
+        return { prompt, responseMd: text, ...usageMetrics };
+      }
+    }
+  }
+
+  return undefined;
 }
 
 export function resolveServerProjectDir(cwd?: string): string | undefined {
@@ -618,9 +738,9 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   let lastKnownSessionName: string | undefined;
   let lastKnownRepo: string | undefined;
   let latestUserPrompt: string | undefined;
-  let pendingTurnPrompts: string[] = [];
   let promptInFlight = false;
   let turnTreeBefore: string | undefined;
+  let turnQuotaBefore: CopilotQuotaSnapshot | undefined;
 
   function ensureConfiguredBaseUrl(ctx?: ExtensionContextView): string | undefined {
     const baseUrl = resolveBaseUrl();
@@ -836,11 +956,8 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
         if (!msg) continue;
 
         latestUserPrompt = msg;
-        pendingTurnPrompts.push(msg);
         promptInFlight = true;
-        if (!turnTreeBefore) {
-          turnTreeBefore = captureGitTreeSnapshot(effectiveCwd);
-        }
+        turnTreeBefore = captureGitTreeSnapshot(effectiveCwd);
 
         if (typeof pi.sendUserMessage === "function") {
           pi.sendUserMessage(msg);
@@ -861,6 +978,23 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
       return;
     }
     await syncSessionRegistration(ctx);
+    const initialQuota = fetchCopilotQuotaSnapshot();
+    if (initialQuota) {
+      const sessionId = readSessionId(ctx);
+      const baseUrl = resolveBaseUrl();
+      if (sessionId && baseUrl) {
+        try {
+          await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/heartbeat`, {
+            method: "POST",
+            headers: buildRequestHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ copilotQuota: initialQuota }),
+            signal: AbortSignal.timeout(2500),
+          });
+        } catch {
+          // ignore
+        }
+      }
+    }
 
     if (typeof ctx?.setInterval === "function") {
       ctx.setInterval(() => {
@@ -871,11 +1005,10 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   });
 
   pi.on("session_switch", async (_event, ctx) => {
-    if (ctx?.agent?.kind && ctx.agent.kind !== "main") return;
     latestUserPrompt = undefined;
-    pendingTurnPrompts = [];
     promptInFlight = false;
     turnTreeBefore = undefined;
+    turnQuotaBefore = undefined;
     await syncSessionRegistration(ctx);
   });
 
@@ -904,9 +1037,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
     if (!text.startsWith("/")) {
       latestUserPrompt = text;
-      if (!turnTreeBefore) {
-        turnTreeBefore = captureGitTreeSnapshot(ctx?.cwd || process.cwd());
-      }
+      turnTreeBefore = captureGitTreeSnapshot(ctx?.cwd || process.cwd());
       promptInFlight = true;
     }
   });
@@ -920,15 +1051,13 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
         .trim();
       if (cleaned) {
         latestUserPrompt = cleaned;
-        if (pendingTurnPrompts[pendingTurnPrompts.length - 1] !== cleaned) {
-          pendingTurnPrompts.push(cleaned);
-        }
         promptInFlight = true;
       }
     }
     if (!turnTreeBefore) {
       turnTreeBefore = captureGitTreeSnapshot(ctx?.cwd || process.cwd());
     }
+    turnQuotaBefore = fetchCopilotQuotaSnapshot();
     await checkAndSyncSessionRename(ctx);
   });
 
@@ -943,10 +1072,9 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     const eventMessages = Array.isArray(event?.messages) ? event.messages : [];
     const branchEntries = ctx?.sessionManager?.getBranch?.() ?? [];
 
-    const fromEvent = extractTurnFromEventMessages(eventMessages);
+    const fromEvent = extractLatestTurnFromMessages(eventMessages);
     if (fromEvent?.aborted) {
       promptInFlight = false;
-      pendingTurnPrompts = [];
       turnTreeBefore = undefined;
       return;
     }
@@ -954,29 +1082,22 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     const fromBranch = !fromEvent ? extractLatestTurnFromMessages(branchEntries) : undefined;
     if (fromBranch?.aborted) {
       promptInFlight = false;
-      pendingTurnPrompts = [];
       turnTreeBefore = undefined;
       return;
     }
 
-    const combinedPendingPrompt = pendingTurnPrompts.join("\n\n").trim();
-    const extractedPrompt = fromEvent?.prompt ?? fromBranch?.prompt;
-    const prompt =
-      combinedPendingPrompt.length > (extractedPrompt?.length ?? 0)
-        ? combinedPendingPrompt
-        : extractedPrompt;
+    const prompt = fromEvent?.prompt ?? fromBranch?.prompt ?? latestUserPrompt;
     const responseMd = fromEvent?.responseMd ?? fromBranch?.responseMd;
 
     if (!prompt || !responseMd) {
       promptInFlight = false;
-      pendingTurnPrompts = [];
       turnTreeBefore = undefined;
       return;
     }
     if (!promptInFlight && !fromEvent) return;
 
     promptInFlight = false;
-    pendingTurnPrompts = [];
+
     const effectiveCwd = ctx?.cwd || process.cwd();
     const repo = lastKnownRepo ?? resolveRepoName(effectiveCwd);
     const repoPath = resolveRepoRootPath(effectiveCwd);
@@ -987,6 +1108,18 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     turnTreeBefore = undefined;
     const treeAfter = captureGitTreeSnapshot(effectiveCwd);
     const diffPatch = computeGitTreeDiff(effectiveCwd, treeBefore, treeAfter);
+    const turnUsage = fromEvent ?? fromBranch;
+    const quotaBefore = turnQuotaBefore;
+    turnQuotaBefore = undefined;
+    const copilotQuota = fetchCopilotQuotaSnapshot();
+
+    let measuredCredits = turnUsage?.creditsUsed;
+    if (quotaBefore && copilotQuota && copilotQuota.entitlement === quotaBefore.entitlement) {
+      const exactDelta = Math.round((copilotQuota.creditsUsed - quotaBefore.creditsUsed) * 10) / 10;
+      if (exactDelta > 0) {
+        measuredCredits = exactDelta;
+      }
+    }
 
     await requestWithRetryPrompt(ctx, "POST", "/api/conversations", {
       sessionId,
@@ -998,6 +1131,11 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
       diffPatch,
       gitTreeBefore: treeBefore,
       gitTreeAfter: treeAfter,
+      creditsUsed: measuredCredits,
+      costUsd: turnUsage?.costUsd,
+      totalTokens: turnUsage?.totalTokens,
+      model: turnUsage?.model,
+      copilotQuota,
     });
   });
 

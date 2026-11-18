@@ -14,10 +14,34 @@ public sealed class ActiveSessionTracker
     private readonly object _procCacheLock = new();
     private DateTimeOffset _lastProcScan = DateTimeOffset.MinValue;
     private HashSet<string> _cachedProcSessionIds = new(StringComparer.Ordinal);
+    private CopilotQuotaSnapshot? _latestCopilotQuota;
 
     public ActiveSessionTracker(HistoryNotifier notifier)
     {
         _notifier = notifier;
+    }
+
+    public CopilotQuotaSnapshot? LatestCopilotQuota => _latestCopilotQuota;
+
+    public void UpdateCopilotQuota(CopilotQuotaSnapshot? quota)
+    {
+        if (quota is null || quota.Entitlement <= 0)
+        {
+            return;
+        }
+
+        var stamped = string.IsNullOrWhiteSpace(quota.UpdatedAt)
+            ? quota with { UpdatedAt = DateTime.UtcNow.ToString("O") }
+            : quota;
+        var prev = _latestCopilotQuota;
+        _latestCopilotQuota = stamped;
+
+        if (prev is null
+            || Math.Abs(prev.CreditsUsed - stamped.CreditsUsed) >= 0.1
+            || Math.Abs(prev.Remaining - stamped.Remaining) >= 0.1)
+        {
+            _notifier.NotifyChanged();
+        }
     }
 
     public void RecordHeartbeat(string sessionId)
@@ -207,13 +231,19 @@ public sealed class ActiveSessionTracker
     }
 
 
-    public FeedbackItem EnqueueFeedback(string sessionId, string comment, string? quotedText, long? conversationId)
+    public FeedbackItem EnqueueFeedback(
+        string sessionId,
+        string comment,
+        string? quotedText,
+        long? conversationId,
+        string? locationContext = null)
     {
         var trimmedSessionId = sessionId.Trim();
         var trimmedComment = comment.Trim();
         var trimmedQuote = string.IsNullOrWhiteSpace(quotedText) ? null : quotedText.Trim();
+        var trimmedLocation = string.IsNullOrWhiteSpace(locationContext) ? null : locationContext.Trim();
 
-        var formattedMessage = BuildFormattedMessage(trimmedComment, trimmedQuote);
+        var formattedMessage = BuildFormattedMessage(trimmedComment, trimmedQuote, trimmedLocation);
         var item = new FeedbackItem(
             Id: Guid.NewGuid().ToString("N"),
             SessionId: trimmedSessionId,
@@ -221,7 +251,32 @@ public sealed class ActiveSessionTracker
             QuotedText: trimmedQuote,
             Comment: trimmedComment,
             FormattedMessage: formattedMessage,
-            CreatedAt: DateTime.UtcNow.ToString("O"));
+            CreatedAt: DateTime.UtcNow.ToString("O"),
+            LocationContext: trimmedLocation);
+
+        var queue = _pendingFeedback.GetOrAdd(trimmedSessionId, _ => new ConcurrentQueue<FeedbackItem>());
+        queue.Enqueue(item);
+        _notifier.NotifyChanged();
+        return item;
+    }
+
+    public FeedbackItem EnqueueFeedbackBatch(
+        string sessionId,
+        IReadOnlyList<FeedbackDraftItem> drafts)
+    {
+        var trimmedSessionId = sessionId.Trim();
+        var formattedMessage = BuildBatchFormattedMessage(drafts);
+        var first = drafts.Count > 0 ? drafts[0] : null;
+
+        var item = new FeedbackItem(
+            Id: Guid.NewGuid().ToString("N"),
+            SessionId: trimmedSessionId,
+            ConversationId: first?.ConversationId,
+            QuotedText: first?.QuotedText,
+            Comment: formattedMessage,
+            FormattedMessage: formattedMessage,
+            CreatedAt: DateTime.UtcNow.ToString("O"),
+            LocationContext: first?.LocationContext);
 
         var queue = _pendingFeedback.GetOrAdd(trimmedSessionId, _ => new ConcurrentQueue<FeedbackItem>());
         queue.Enqueue(item);
@@ -258,18 +313,98 @@ public sealed class ActiveSessionTracker
         return list;
     }
 
-    public static string BuildFormattedMessage(string comment, string? quotedText)
+    public static string BuildFormattedMessage(string comment, string? quotedText, string? locationContext = null)
     {
-        if (string.IsNullOrWhiteSpace(quotedText))
+        var parts = new List<string>(3);
+
+        if (!string.IsNullOrWhiteSpace(locationContext))
         {
-            return comment;
+            parts.Add($"**[{locationContext.Trim()}]**");
         }
 
-        var quoteLines = quotedText
-            .Replace("\r\n", "\n")
-            .Split('\n')
-            .Select(line => $"> {line}");
+        if (!string.IsNullOrWhiteSpace(quotedText))
+        {
+            var quoteLines = quotedText
+                .Replace("\r\n", "\n")
+                .Split('\n')
+                .Select(line => $"> {line}");
+            parts.Add(string.Join("\n", quoteLines));
+        }
 
-        return $"{string.Join("\n", quoteLines)}\n\n{comment}";
+        parts.Add(comment.Trim());
+        return string.Join("\n\n", parts);
+    }
+
+    public static string BuildBatchFormattedMessage(IReadOnlyList<FeedbackDraftItem> drafts)
+    {
+        if (drafts.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        if (drafts.Count == 1)
+        {
+            var single = drafts[0];
+            var loc = BuildItemLocationHeader(single);
+            return BuildFormattedMessage(single.Comment, single.QuotedText, loc);
+        }
+
+        var blocks = new List<string>(drafts.Count + 1)
+        {
+            $"### Feedback ({drafts.Count} items)"
+        };
+
+        for (var i = 0; i < drafts.Count; i++)
+        {
+            var d = drafts[i];
+            var header = BuildItemLocationHeader(d);
+            var sb = new System.Text.StringBuilder();
+            if (!string.IsNullOrWhiteSpace(header))
+            {
+                sb.AppendLine($"#### {i + 1}. [{header}]");
+            }
+            else
+            {
+                sb.AppendLine($"#### {i + 1}. Comment");
+            }
+
+            if (!string.IsNullOrWhiteSpace(d.QuotedText))
+            {
+                var quoteLines = d.QuotedText
+                    .Replace("\r\n", "\n")
+                    .Split('\n')
+                    .Select(line => $"> {line}");
+                sb.AppendLine(string.Join("\n", quoteLines));
+                sb.AppendLine();
+            }
+
+            sb.Append(d.Comment.Trim());
+            blocks.Add(sb.ToString());
+        }
+
+        return string.Join("\n\n---\n\n", blocks);
+    }
+
+    private static string? BuildItemLocationHeader(FeedbackDraftItem d)
+    {
+        var hasTurn = d.TurnNumber is > 0;
+        var hasLoc = !string.IsNullOrWhiteSpace(d.LocationContext);
+        if (hasTurn && hasLoc)
+        {
+            if (d.LocationContext!.StartsWith("Turn #", StringComparison.OrdinalIgnoreCase))
+            {
+                return d.LocationContext.Trim();
+            }
+            return $"Turn #{d.TurnNumber} • {d.LocationContext.Trim()}";
+        }
+        if (hasLoc)
+        {
+            return d.LocationContext!.Trim();
+        }
+        if (hasTurn)
+        {
+            return $"Turn #{d.TurnNumber}";
+        }
+        return null;
     }
 }

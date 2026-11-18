@@ -91,7 +91,11 @@ public sealed class HistoryRepository
         {
             "ALTER TABLE conversations ADD COLUMN diff_patch TEXT;",
             "ALTER TABLE conversations ADD COLUMN git_tree_before TEXT;",
-            "ALTER TABLE conversations ADD COLUMN git_tree_after TEXT;"
+            "ALTER TABLE conversations ADD COLUMN git_tree_after TEXT;",
+            "ALTER TABLE conversations ADD COLUMN credits_used REAL;",
+            "ALTER TABLE conversations ADD COLUMN cost_usd REAL;",
+            "ALTER TABLE conversations ADD COLUMN total_tokens INTEGER;",
+            "ALTER TABLE conversations ADD COLUMN model TEXT;"
         })
         {
             try
@@ -247,13 +251,18 @@ public sealed class HistoryRepository
         string? repoPath = null,
         string? diffPatch = null,
         string? gitTreeBefore = null,
-        string? gitTreeAfter = null)
+        string? gitTreeAfter = null,
+        double? creditsUsed = null,
+        double? costUsd = null,
+        long? totalTokens = null,
+        string? model = null)
     {
         var now = DateTime.UtcNow.ToString("O");
         var normalizedRepoPath = string.IsNullOrWhiteSpace(repoPath) ? null : repoPath.Trim();
         var normalizedDiffPatch = string.IsNullOrWhiteSpace(diffPatch) ? null : diffPatch;
         var normalizedTreeBefore = string.IsNullOrWhiteSpace(gitTreeBefore) ? null : gitTreeBefore.Trim();
         var normalizedTreeAfter = string.IsNullOrWhiteSpace(gitTreeAfter) ? null : gitTreeAfter.Trim();
+        var normalizedModel = string.IsNullOrWhiteSpace(model) ? null : model.Trim();
         using var conn = OpenConnection();
         using var tx = conn.BeginTransaction();
 
@@ -300,8 +309,8 @@ public sealed class HistoryRepository
         {
             insertCmd.Transaction = tx;
             insertCmd.CommandText = """
-                INSERT INTO conversations (session_id, prompt, response_md, created_at, diff_patch, git_tree_before, git_tree_after)
-                VALUES ($sessionId, $prompt, $responseMd, $now, $diffPatch, $gitTreeBefore, $gitTreeAfter);
+                INSERT INTO conversations (session_id, prompt, response_md, created_at, diff_patch, git_tree_before, git_tree_after, credits_used, cost_usd, total_tokens, model)
+                VALUES ($sessionId, $prompt, $responseMd, $now, $diffPatch, $gitTreeBefore, $gitTreeAfter, $creditsUsed, $costUsd, $totalTokens, $model);
                 SELECT last_insert_rowid();
                 """;
             insertCmd.Parameters.AddWithValue("$sessionId", sessionId);
@@ -311,6 +320,10 @@ public sealed class HistoryRepository
             insertCmd.Parameters.AddWithValue("$diffPatch", (object?)normalizedDiffPatch ?? DBNull.Value);
             insertCmd.Parameters.AddWithValue("$gitTreeBefore", (object?)normalizedTreeBefore ?? DBNull.Value);
             insertCmd.Parameters.AddWithValue("$gitTreeAfter", (object?)normalizedTreeAfter ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("$creditsUsed", (object?)creditsUsed ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("$costUsd", (object?)costUsd ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("$totalTokens", (object?)totalTokens ?? DBNull.Value);
+            insertCmd.Parameters.AddWithValue("$model", (object?)normalizedModel ?? DBNull.Value);
             id = (long)insertCmd.ExecuteScalar()!;
         }
 
@@ -325,7 +338,11 @@ public sealed class HistoryRepository
             now,
             normalizedDiffPatch,
             normalizedTreeBefore,
-            normalizedTreeAfter);
+            normalizedTreeAfter,
+            creditsUsed,
+            costUsd,
+            totalTokens,
+            normalizedModel);
     }
 
     public IReadOnlyList<RepoSummary> GetRepos()
@@ -385,7 +402,10 @@ public sealed class HistoryRepository
                    s.name,
                    s.created_at,
                    s.updated_at,
-                   COUNT(c.id) AS conversation_count
+                   COUNT(c.id) AS conversation_count,
+                   SUM(c.credits_used) AS total_credits,
+                   SUM(c.cost_usd) AS total_cost_usd,
+                   SUM(c.total_tokens) AS total_tokens
             FROM sessions s
             LEFT JOIN conversations c ON c.session_id = s.session_id
             WHERE s.repo = $repo
@@ -398,13 +418,7 @@ public sealed class HistoryRepository
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
-            list.Add(new SessionRecord(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetString(2),
-                reader.GetString(3),
-                reader.GetString(4),
-                reader.GetInt32(5)));
+            list.Add(ReadSessionRecord(reader));
         }
         return list;
     }
@@ -419,7 +433,10 @@ public sealed class HistoryRepository
                    s.name,
                    s.created_at,
                    s.updated_at,
-                   COUNT(c.id) AS conversation_count
+                   COUNT(c.id) AS conversation_count,
+                   SUM(c.credits_used) AS total_credits,
+                   SUM(c.cost_usd) AS total_cost_usd,
+                   SUM(c.total_tokens) AS total_tokens
             FROM sessions s
             LEFT JOIN conversations c ON c.session_id = s.session_id
             GROUP BY s.session_id, s.repo, s.name, s.created_at, s.updated_at
@@ -432,13 +449,7 @@ public sealed class HistoryRepository
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
-            list.Add(new SessionRecord(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetString(2),
-                reader.GetString(3),
-                reader.GetString(4),
-                reader.GetInt32(5)));
+            list.Add(ReadSessionRecord(reader));
         }
         return list;
     }
@@ -458,7 +469,10 @@ public sealed class HistoryRepository
                    s.name,
                    s.created_at,
                    s.updated_at,
-                   COUNT(c.id) AS conversation_count
+                   COUNT(c.id) AS conversation_count,
+                   SUM(c.credits_used) AS total_credits,
+                   SUM(c.cost_usd) AS total_cost_usd,
+                   SUM(c.total_tokens) AS total_tokens
             FROM sessions s
             LEFT JOIN conversations c ON c.session_id = s.session_id
             WHERE s.session_id = $sessionId
@@ -470,16 +484,22 @@ public sealed class HistoryRepository
         using var reader = cmd.ExecuteReader();
         if (reader.Read())
         {
-            return new SessionRecord(
-                reader.GetString(0),
-                reader.GetString(1),
-                reader.GetString(2),
-                reader.GetString(3),
-                reader.GetString(4),
-                reader.GetInt32(5));
+            return ReadSessionRecord(reader);
         }
         return null;
     }
+
+    private static SessionRecord ReadSessionRecord(SqliteDataReader reader) =>
+        new(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetString(4),
+            reader.GetInt32(5),
+            reader.IsDBNull(6) ? null : reader.GetDouble(6),
+            reader.IsDBNull(7) ? null : reader.GetDouble(7),
+            reader.IsDBNull(8) ? null : reader.GetInt64(8));
 
     public string? ExportSessionJsonl(string sessionId, string? targetCwd = null, string? model = null)
     {
@@ -615,7 +635,7 @@ public sealed class HistoryRepository
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT id, session_id, prompt, response_md, created_at, diff_patch, git_tree_before, git_tree_after
+            SELECT id, session_id, prompt, response_md, created_at, diff_patch, git_tree_before, git_tree_after, credits_used, cost_usd, total_tokens, model
             FROM conversations
             WHERE session_id = $sessionId
             ORDER BY id ASC;
@@ -634,7 +654,11 @@ public sealed class HistoryRepository
                 reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7)));
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetDouble(8),
+                reader.IsDBNull(9) ? null : reader.GetDouble(9),
+                reader.IsDBNull(10) ? null : reader.GetInt64(10),
+                reader.IsDBNull(11) ? null : reader.GetString(11)));
         }
         return list;
     }

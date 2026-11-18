@@ -42,6 +42,37 @@
         </div>
 
         <div class="header-actions">
+            @{
+                var quota = SessionTracker.LatestCopilotQuota;
+            }
+            @if (quota is not null && quota.Entitlement > 0)
+            {
+                var usedPct = Math.Clamp((quota.CreditsUsed / quota.Entitlement) * 100.0, 0.0, 100.0);
+                var meterClass = usedPct >= 85.0
+                    ? "meter-low"
+                    : (usedPct >= 65.0 ? "meter-warn" : "meter-ok");
+                <div class="copilot-meter @meterClass"
+                     title="@($"Copilot AI Credits ({quota.Plan ?? "account"}): {quota.CreditsUsed:N1} used / {quota.Entitlement:N0} total ({usedPct:0.0}% used • {quota.Remaining:N1} remaining){(string.IsNullOrWhiteSpace(quota.ResetDate) ? "" : $" • Resets {quota.ResetDate}")}")">
+                    <div class="copilot-meter-top">
+                        <span class="copilot-meter-label">COPILOT</span>
+                        <span class="copilot-meter-value">@($"{quota.CreditsUsed:N0} / {quota.Entitlement:N0}")</span>
+                        <span class="copilot-meter-pct">(@($"{usedPct:0.0}%"))</span>
+                    </div>
+                    <div class="copilot-meter-bar">
+                        <div class="copilot-meter-fill" style="width: @($"{usedPct.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}%");"></div>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <div class="copilot-meter meter-na" title="Copilot AI credit quota will populate on next OMP session or turn">
+                    <div class="copilot-meter-top">
+                        <span class="copilot-meter-label">COPILOT</span>
+                        <span class="copilot-meter-value">N/A</span>
+                    </div>
+                </div>
+            }
+
             <button type="button"
                     class="pin-panes-btn git-compare-header-btn @(_isGitCompareOpen ? "active" : "")"
                     title="@(_isGitCompareOpen ? "Close Git Compare and return to conversation" : "Open Git Compare for the selected repository")"
@@ -117,6 +148,11 @@
                                 <div class="session-id" title="@session.SessionId">@session.SessionId</div>
                                 <div class="session-meta">
                                     <span>@session.ConversationCount @(session.ConversationCount == 1 ? "turn" : "turns")</span>
+                                    <span>•</span>
+                                    <span class="usage-meta-pill @(session.TotalCredits.HasValue ? "" : "usage-na")"
+                                          title="@FormatUsageTooltip(session.TotalCredits, session.TotalCostUsd, session.TotalTokens)">
+                                        Cr: @FormatCredits(session.TotalCredits)
+                                    </span>
                                     <span>•</span>
                                     <span title="@session.UpdatedAt">@FormatFullDateTime(session.UpdatedAt)</span>
                                 </div>
@@ -251,6 +287,10 @@
                                     {
                                         <span class="turn-snapshot-dot" title="Git snapshot recorded for this turn"></span>
                                     }
+                                    <span class="turn-credits-badge @(conv.CreditsUsed.HasValue ? "" : "usage-na")"
+                                          title="@FormatUsageTooltip(conv.CreditsUsed, conv.CostUsd, conv.TotalTokens, conv.Model)">
+                                        Cr: @FormatCredits(conv.CreditsUsed)
+                                    </span>
                                 </div>
                                 <span class="turn-time">@FormatTimestamp(conv.CreatedAt)</span>
                             </div>
@@ -264,6 +304,70 @@
 
         <!-- Pane 3: Conversation detail (Question/Task + Markdown Response) -->
         <main class="pane detail-pane" aria-label="Conversation Details">
+            @if (_feedbackDrafts.Count > 0 && !_isFeedbackOpen)
+            {
+                <div class="feedback-batch-bar">
+                    <div class="feedback-batch-bar-main">
+                        <div class="feedback-batch-summary" @onclick="ToggleFeedbackBatchExpanded" title="Click to review or edit queued comments">
+                            <span class="feedback-batch-badge">@_feedbackDrafts.Count</span>
+                            <span class="feedback-batch-label">
+                                @(_feedbackDrafts.Count == 1 ? "1 staged comment" : $"{_feedbackDrafts.Count} staged comments") ready to send
+                            </span>
+                            <span class="feedback-batch-chevron">@(_isFeedbackBatchExpanded ? "▾" : "▸")</span>
+                        </div>
+                        <div class="feedback-batch-actions">
+                            <button type="button"
+                                    class="word-comment-btn word-comment-btn-cancel"
+                                    title="Discard all staged comments"
+                                    @onclick="ClearFeedbackBatch">
+                                Clear All
+                            </button>
+                            <button type="button"
+                                    class="word-comment-btn word-comment-btn-post"
+                                    title="Send all staged comments to OMP in a single prompt"
+                                    @onclick="SubmitFeedbackBatchOnly">
+                                <span>Send All (@_feedbackDrafts.Count)</span>
+                                <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
+                                    <path d="M1.5 1.5L14.5 8L1.5 14.5L3.5 8L1.5 1.5ZM4.8 8.7L3.2 12.6L12.1 8L3.2 3.4L4.8 7.3H9.5V8.7H4.8Z" />
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    @if (_isFeedbackBatchExpanded)
+                    {
+                        <div class="feedback-batch-list">
+                            @for (var i = 0; i < _feedbackDrafts.Count; i++)
+                            {
+                                var idx = i;
+                                var draft = _feedbackDrafts[i];
+                                <div class="feedback-batch-item">
+                                    <div class="feedback-batch-item-header">
+                                        <span class="feedback-batch-item-num">#@(idx + 1)</span>
+                                        @if (draft.TurnNumber is > 0)
+                                        {
+                                            <span class="feedback-location-pill">Turn #@draft.TurnNumber</span>
+                                        }
+                                        @if (!string.IsNullOrWhiteSpace(draft.LocationContext))
+                                        {
+                                            <span class="feedback-location-pill">@draft.LocationContext</span>
+                                        }
+                                        <button type="button"
+                                                class="feedback-batch-item-remove"
+                                                title="Remove this comment"
+                                                @onclick="() => RemoveFeedbackDraft(draft.Id)">×</button>
+                                    </div>
+                                    @if (!string.IsNullOrWhiteSpace(draft.QuotedText))
+                                    {
+                                        <div class="feedback-batch-item-quote">“@TruncatePreview(draft.QuotedText, 120)”</div>
+                                    }
+                                    <div class="feedback-batch-item-comment">@draft.Comment</div>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
             @if (_isGitCompareOpen)
             {
                 <div class="detail-scroll git-compare-scroll"
@@ -559,6 +663,18 @@
                         <div class="section-label">
                             <div class="section-label-left">
                                 <span>MODEL RESPONSE</span>
+                                @if (!string.IsNullOrWhiteSpace(SelectedConversation.Model))
+                                {
+                                    <span class="response-model-badge">@SelectedConversation.Model</span>
+                                }
+                                <span class="turn-credits-badge @(SelectedConversation.CreditsUsed.HasValue ? "" : "usage-na")"
+                                      title="@FormatUsageTooltip(SelectedConversation.CreditsUsed, SelectedConversation.CostUsd, SelectedConversation.TotalTokens, SelectedConversation.Model)">
+                                    Credits: @FormatCredits(SelectedConversation.CreditsUsed)
+                                    @if (SelectedConversation.TotalTokens.HasValue)
+                                    {
+                                        <span> • @FormatTokens(SelectedConversation.TotalTokens.Value) tok</span>
+                                    }
+                                </span>
                                 <span class="response-context-hint">Select text &amp; right-click to comment</span>
                             </div>
                             @if (!string.IsNullOrEmpty(_feedbackStatusMessage))
@@ -694,24 +810,72 @@
                                     </div>
                                 }
 
-                                @if (!string.IsNullOrWhiteSpace(_feedbackQuotedText))
+                                @if (_feedbackDrafts.Count > 0)
+                                {
+                                    <div class="word-comment-batch-preview">
+                                        <div class="word-comment-batch-header">
+                                            <span>Staged batch (@_feedbackDrafts.Count)</span>
+                                            <button type="button"
+                                                    class="word-comment-quote-clear"
+                                                    title="Clear all staged comments"
+                                                    @onclick="ClearFeedbackBatch">Clear all</button>
+                                        </div>
+                                        <div class="word-comment-batch-items">
+                                            @for (var i = 0; i < _feedbackDrafts.Count; i++)
+                                            {
+                                                var idx = i;
+                                                var d = _feedbackDrafts[i];
+                                                <div class="word-comment-batch-chip">
+                                                    <span class="word-comment-batch-chip-num">#@(idx + 1)</span>
+                                                    <span class="word-comment-batch-chip-text" title="@d.Comment">
+                                                        @if (!string.IsNullOrWhiteSpace(d.LocationContext))
+                                                        {
+                                                            <strong>[@TruncatePreview(d.LocationContext, 36)]</strong>
+                                                            <span> </span>
+                                                        }
+                                                        @TruncatePreview(d.Comment, 55)
+                                                    </span>
+                                                    <button type="button"
+                                                            class="word-comment-quote-clear"
+                                                            title="Remove item"
+                                                            @onclick="() => RemoveFeedbackDraft(d.Id)">×</button>
+                                                </div>
+                                            }
+                                        </div>
+                                    </div>
+                                }
+
+                                @if (!string.IsNullOrWhiteSpace(_feedbackLocationContext) || !string.IsNullOrWhiteSpace(_feedbackQuotedText))
                                 {
                                     <div class="word-comment-quote">
                                         <div class="word-comment-quote-header">
-                                            <span>Quoted from response</span>
+                                            <div class="word-comment-quote-meta">
+                                                <span>Target</span>
+                                                @if (SelectedTurnNumber is > 0 && !_isGitCompareOpen)
+                                                {
+                                                    <span class="feedback-location-pill">Turn #@SelectedTurnNumber</span>
+                                                }
+                                                @if (!string.IsNullOrWhiteSpace(_feedbackLocationContext))
+                                                {
+                                                    <span class="feedback-location-pill" title="@_feedbackLocationContext">@_feedbackLocationContext</span>
+                                                }
+                                            </div>
                                             <button type="button"
                                                     class="word-comment-quote-clear"
-                                                    title="Remove quote"
+                                                    title="Remove target quote &amp; position"
                                                     @onclick="ClearFeedbackQuote">×</button>
                                         </div>
-                                        <blockquote>@_feedbackQuotedText</blockquote>
+                                        @if (!string.IsNullOrWhiteSpace(_feedbackQuotedText))
+                                        {
+                                            <blockquote>@_feedbackQuotedText</blockquote>
+                                        }
                                     </div>
                                 }
 
                                 <textarea id="word-comment-textarea"
                                           class="word-comment-textarea"
                                           rows="3"
-                                          placeholder="Add a comment or reply to OMP… (Ctrl+Enter to send)"
+                                          placeholder="Add comment… (Shift+Enter: Add to batch • Ctrl+Enter: Send)"
                                           @bind="_feedbackComment"
                                           @bind:event="oninput"
                                           @onkeydown="HandleFeedbackKeyDown"></textarea>
@@ -720,14 +884,21 @@
                                     <button type="button"
                                             class="word-comment-btn word-comment-btn-cancel"
                                             @onclick="CloseFeedbackCard">
-                                        Cancel
+                                        Close
+                                    </button>
+                                    <button type="button"
+                                            class="word-comment-btn word-comment-btn-stage"
+                                            disabled="@string.IsNullOrWhiteSpace(_feedbackComment)"
+                                            title="Stage this comment and continue selecting other parts (Shift+Enter)"
+                                            @onclick="AddFeedbackToBatch">
+                                        <span>+ Add to Batch</span>
                                     </button>
                                     <button type="button"
                                             class="word-comment-btn word-comment-btn-post"
-                                            disabled="@string.IsNullOrWhiteSpace(_feedbackComment)"
-                                            title="Post comment to OMP (Ctrl+Enter)"
+                                            disabled="@(string.IsNullOrWhiteSpace(_feedbackComment) && _feedbackDrafts.Count == 0)"
+                                            title="Send comment(s) to OMP now (Ctrl+Enter)"
                                             @onclick="SubmitFeedback">
-                                        <span>Post</span>
+                                        <span>@SendFeedbackButtonLabel</span>
                                         <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
                                             <path d="M1.5 1.5L14.5 8L1.5 14.5L3.5 8L1.5 1.5ZM4.8 8.7L3.2 12.6L12.1 8L3.2 3.4L4.8 7.3H9.5V8.7H4.8Z" />
                                         </svg>
@@ -810,6 +981,7 @@
 
 @code {
     private sealed record IndexedConversation(int TurnNumber, ConversationRecord Record);
+    private sealed record SelectionCaptureResult(string? Text, string? LocationContext);
 
     private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
         .UseAdvancedExtensions()
@@ -840,8 +1012,11 @@
     private bool _isFeedbackOpen;
     private string _feedbackComment = string.Empty;
     private string? _feedbackQuotedText;
+    private string? _feedbackLocationContext;
     private int _feedbackTopPx = 140;
     private string? _feedbackStatusMessage;
+    private readonly List<FeedbackDraftItem> _feedbackDrafts = [];
+    private bool _isFeedbackBatchExpanded;
     private System.Threading.Timer? _activeStatusTimer;
     private bool _isGitCompareOpen;
     private string _gitCompareMode = "latest";
@@ -906,6 +1081,20 @@
             ? FilteredConversations.Select(x => x.Record).FirstOrDefault(c => c.Id == _selectedConversationId.Value)
             : null;
 
+    private int? SelectedTurnNumber =>
+        _selectedConversationId.HasValue
+            ? FilteredConversations.FirstOrDefault(x => x.Record.Id == _selectedConversationId.Value)?.TurnNumber
+            : null;
+
+    private string SendFeedbackButtonLabel
+    {
+        get
+        {
+            var hasCurrent = !string.IsNullOrWhiteSpace(_feedbackComment);
+            var total = _feedbackDrafts.Count + (hasCurrent ? 1 : 0);
+            return total > 1 ? $"Send All ({total})" : "Send";
+        }
+    }
     protected override void OnInitialized()
     {
         Notifier.OnConversationAdded += HandleConversationAdded;
@@ -1071,6 +1260,11 @@
 
     private void SelectSession(string sessionId)
     {
+        if (!string.Equals(_selectedSessionId, sessionId, StringComparison.Ordinal))
+        {
+            _feedbackDrafts.Clear();
+            _isFeedbackBatchExpanded = false;
+        }
         _selectedSessionId = sessionId;
         LoadConversationsForSelectedSession(selectFirst: true);
     }
@@ -1388,9 +1582,15 @@
         }
 
         string selectedText = string.Empty;
+        string locationContext = string.Empty;
         try
         {
-            selectedText = await JS.InvokeAsync<string>("ompHistoryCaptureSelection");
+            var capture = await JS.InvokeAsync<SelectionCaptureResult?>("ompHistoryCaptureSelection");
+            if (capture is not null)
+            {
+                selectedText = capture.Text ?? string.Empty;
+                locationContext = capture.LocationContext ?? string.Empty;
+            }
         }
         catch
         {
@@ -1398,7 +1598,8 @@
         }
 
         _feedbackQuotedText = string.IsNullOrWhiteSpace(selectedText) ? null : selectedText.Trim();
-        _feedbackTopPx = (int)Math.Clamp(e.ClientY - 24, 68, 520);
+        _feedbackLocationContext = string.IsNullOrWhiteSpace(locationContext) ? null : locationContext.Trim();
+        _feedbackTopPx = (int)Math.Clamp(e.ClientY - 24, 68, 480);
         _isFeedbackOpen = true;
         _feedbackStatusMessage = null;
     }
@@ -1406,6 +1607,7 @@
     private void ClearFeedbackQuote()
     {
         _feedbackQuotedText = null;
+        _feedbackLocationContext = null;
     }
 
     private void CloseFeedbackCard()
@@ -1413,6 +1615,7 @@
         _isFeedbackOpen = false;
         _feedbackComment = string.Empty;
         _feedbackQuotedText = null;
+        _feedbackLocationContext = null;
     }
 
     private void HandleFeedbackKeyDown(KeyboardEventArgs e)
@@ -1421,32 +1624,129 @@
         {
             SubmitFeedback();
         }
+        else if (e.Key == "Enter" && e.ShiftKey)
+        {
+            AddFeedbackToBatch();
+        }
         else if (e.Key == "Escape")
         {
             CloseFeedbackCard();
         }
     }
 
-    private void SubmitFeedback()
+    private void AddFeedbackToBatch()
     {
-        if (string.IsNullOrWhiteSpace(_selectedSessionId) || string.IsNullOrWhiteSpace(_feedbackComment))
+        if (string.IsNullOrWhiteSpace(_feedbackComment))
+        {
+            return;
+        }
+
+        var draft = CreateCurrentDraftItem();
+        if (draft is not null)
+        {
+            _feedbackDrafts.Add(draft);
+        }
+
+        _isFeedbackOpen = false;
+        _feedbackComment = string.Empty;
+        _feedbackQuotedText = null;
+        _feedbackLocationContext = null;
+        _feedbackStatusMessage = $"Added to batch ({_feedbackDrafts.Count} staged)";
+    }
+
+    private void RemoveFeedbackDraft(string id)
+    {
+        _feedbackDrafts.RemoveAll(d => string.Equals(d.Id, id, StringComparison.Ordinal));
+        if (_feedbackDrafts.Count == 0)
+        {
+            _isFeedbackBatchExpanded = false;
+        }
+    }
+
+    private void ClearFeedbackBatch()
+    {
+        _feedbackDrafts.Clear();
+        _isFeedbackBatchExpanded = false;
+    }
+
+    private void ToggleFeedbackBatchExpanded()
+    {
+        _isFeedbackBatchExpanded = !_isFeedbackBatchExpanded;
+    }
+
+    private FeedbackDraftItem? CreateCurrentDraftItem()
+    {
+        if (string.IsNullOrWhiteSpace(_feedbackComment))
+        {
+            return null;
+        }
+
+        var turnNum = _isGitCompareOpen ? null : SelectedTurnNumber;
+        var loc = _feedbackLocationContext;
+        if (_isGitCompareOpen && string.IsNullOrWhiteSpace(loc))
+        {
+            loc = $"Git Compare ({_gitCompareMode})";
+        }
+
+        return new FeedbackDraftItem(
+            Id: Guid.NewGuid().ToString("N"),
+            ConversationId: SelectedConversation?.Id,
+            TurnNumber: turnNum,
+            LocationContext: loc,
+            QuotedText: _feedbackQuotedText,
+            Comment: _feedbackComment.Trim());
+    }
+
+    private void SubmitFeedbackBatchOnly()
+    {
+        if (string.IsNullOrWhiteSpace(_selectedSessionId) || _feedbackDrafts.Count == 0)
         {
             return;
         }
 
         var isActive = IsSelectedSessionActive;
-        SessionTracker.EnqueueFeedback(
-            _selectedSessionId,
-            _feedbackComment,
-            _feedbackQuotedText,
-            SelectedConversation?.Id);
+        var count = _feedbackDrafts.Count;
+        SessionTracker.EnqueueFeedbackBatch(_selectedSessionId, _feedbackDrafts.ToList());
+        _feedbackDrafts.Clear();
+        _isFeedbackBatchExpanded = false;
+        _isFeedbackOpen = false;
+        _feedbackStatusMessage = isActive
+            ? $"Sent {count} feedback {(count == 1 ? "comment" : "comments")} to active OMP session"
+            : $"Queued {count} feedback {(count == 1 ? "comment" : "comments")} (will deliver when session becomes active)";
+    }
 
+    private void SubmitFeedback()
+    {
+        if (string.IsNullOrWhiteSpace(_selectedSessionId))
+        {
+            return;
+        }
+
+        var currentDraft = CreateCurrentDraftItem();
+        if (currentDraft is null && _feedbackDrafts.Count == 0)
+        {
+            return;
+        }
+
+        var allDrafts = new List<FeedbackDraftItem>(_feedbackDrafts);
+        if (currentDraft is not null)
+        {
+            allDrafts.Add(currentDraft);
+        }
+
+        var isActive = IsSelectedSessionActive;
+        var count = allDrafts.Count;
+        SessionTracker.EnqueueFeedbackBatch(_selectedSessionId, allDrafts);
+
+        _feedbackDrafts.Clear();
+        _isFeedbackBatchExpanded = false;
         _isFeedbackOpen = false;
         _feedbackComment = string.Empty;
         _feedbackQuotedText = null;
+        _feedbackLocationContext = null;
         _feedbackStatusMessage = isActive
-            ? "Feedback sent to active OMP session"
-            : "Feedback queued (will deliver when session becomes active)";
+            ? (count > 1 ? $"Sent {count} feedback comments to active OMP session" : "Feedback sent to active OMP session")
+            : (count > 1 ? $"Queued {count} feedback comments for session" : "Feedback queued (will deliver when session becomes active)");
     }
 
     private void RequestDeleteSession(SessionRecord session)
@@ -1536,6 +1836,52 @@
         }
         return iso;
     }
+    private static string FormatCredits(double? credits)
+    {
+        if (!credits.HasValue)
+        {
+            return "N/A";
+        }
+        return credits.Value.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatTokens(long tokens)
+    {
+        if (tokens >= 1_000_000)
+        {
+            return $"{(tokens / 1_000_000.0).ToString("0.1", System.Globalization.CultureInfo.InvariantCulture)}M";
+        }
+        if (tokens >= 1_000)
+        {
+            return $"{(tokens / 1_000.0).ToString("0.1", System.Globalization.CultureInfo.InvariantCulture)}k";
+        }
+        return tokens.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatUsageTooltip(double? credits, double? costUsd, long? totalTokens, string? model = null)
+    {
+        if (!credits.HasValue && !costUsd.HasValue && !totalTokens.HasValue)
+        {
+            return "Usage data: N/A (recorded before credit tracking)";
+        }
+
+        var parts = new List<string>(4);
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+            parts.Add($"Model: {model}");
+        }
+        parts.Add($"Credits: {(credits.HasValue ? credits.Value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) : "N/A")}");
+        if (costUsd.HasValue)
+        {
+            parts.Add($"Est. Cost: ${costUsd.Value.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture)}");
+        }
+        if (totalTokens.HasValue)
+        {
+            parts.Add($"Tokens: {totalTokens.Value:N0}");
+        }
+        return string.Join(" • ", parts);
+    }
+
 
     public void Dispose()
     {

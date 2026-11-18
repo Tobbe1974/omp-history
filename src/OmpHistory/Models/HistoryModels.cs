@@ -12,7 +12,10 @@ public sealed record SessionRecord(
     string Name,
     string CreatedAt,
     string UpdatedAt,
-    int ConversationCount);
+    int ConversationCount,
+    double? TotalCredits = null,
+    double? TotalCostUsd = null,
+    long? TotalTokens = null);
 
 public sealed record ConversationRecord(
     long Id,
@@ -22,8 +25,11 @@ public sealed record ConversationRecord(
     string CreatedAt,
     string? DiffPatch = null,
     string? GitTreeBefore = null,
-    string? GitTreeAfter = null);
-
+    string? GitTreeAfter = null,
+    double? CreditsUsed = null,
+    double? CostUsd = null,
+    long? TotalTokens = null,
+    string? Model = null);
 public sealed record CreateSessionRequest(
     string SessionId,
     string Repo,
@@ -44,7 +50,12 @@ public sealed record CreateConversationRequest(
     string? RepoPath = null,
     string? DiffPatch = null,
     string? GitTreeBefore = null,
-    string? GitTreeAfter = null);
+    string? GitTreeAfter = null,
+    double? CreditsUsed = null,
+    double? CostUsd = null,
+    long? TotalTokens = null,
+    string? Model = null,
+    CopilotQuotaSnapshot? CopilotQuota = null);
 public sealed record FeedbackItem(
     string Id,
     string SessionId,
@@ -52,17 +63,37 @@ public sealed record FeedbackItem(
     string? QuotedText,
     string Comment,
     string FormattedMessage,
-    string CreatedAt);
+    string CreatedAt,
+    string? LocationContext = null);
 
 public sealed record CreateFeedbackRequest(
     string Comment,
     string? QuotedText = null,
-    long? ConversationId = null);
+    long? ConversationId = null,
+    string? LocationContext = null);
+
+public sealed record FeedbackDraftItem(
+    string Id,
+    long? ConversationId,
+    int? TurnNumber,
+    string? LocationContext,
+    string? QuotedText,
+    string Comment);
+
+public sealed record CopilotQuotaSnapshot(
+    double CreditsUsed,
+    double Remaining,
+    double Entitlement,
+    double PercentRemaining,
+    string? ResetDate = null,
+    string? Plan = null,
+    string? UpdatedAt = null);
 
 public sealed record ActiveSessionHeartbeatRequest(
     string? Repo = null,
     string? Name = null,
-    string? RepoPath = null);
+    string? RepoPath = null,
+    CopilotQuotaSnapshot? CopilotQuota = null);
 
 public sealed record GitCommitInfo(
     string Hash,

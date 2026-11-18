@@ -204,14 +204,25 @@ api.MapPost("/conversations", (CreateConversationRequest req, HistoryRepository 
         req.RepoPath,
         req.DiffPatch,
         req.GitTreeBefore,
-        req.GitTreeAfter);
+        req.GitTreeAfter,
+        req.CreditsUsed,
+        req.CostUsd,
+        req.TotalTokens,
+        req.Model);
     tracker.RecordHeartbeat(req.SessionId);
+    if (req.CopilotQuota is not null)
+    {
+        tracker.UpdateCopilotQuota(req.CopilotQuota);
+    }
 
     return Results.Created($"/api/sessions/{req.SessionId}/conversations/{record.Id}", record);
 });
 
 api.MapGet("/active-sessions", (ActiveSessionTracker tracker) =>
     Results.Ok(tracker.GetActiveSessionIds()));
+
+api.MapGet("/copilot-quota", (ActiveSessionTracker tracker) =>
+    Results.Ok(tracker.LatestCopilotQuota));
 
 api.MapPost("/sessions/{sessionId}/heartbeat", async (string sessionId, HttpRequest httpRequest, HistoryRepository repo, ActiveSessionTracker tracker) =>
 {
@@ -223,6 +234,10 @@ api.MapPost("/sessions/{sessionId}/heartbeat", async (string sessionId, HttpRequ
             if (!string.IsNullOrWhiteSpace(hb?.RepoPath))
             {
                 repo.UpdateSessionRepoPath(sessionId, hb.RepoPath);
+            }
+            if (hb?.CopilotQuota is not null)
+            {
+                tracker.UpdateCopilotQuota(hb.CopilotQuota);
             }
         }
         catch
@@ -250,7 +265,7 @@ api.MapPost("/sessions/{sessionId}/feedback", (string sessionId, CreateFeedbackR
         return Results.BadRequest(new { error = "comment is required" });
     }
 
-    var item = tracker.EnqueueFeedback(sessionId, req.Comment, req.QuotedText, req.ConversationId);
+    var item = tracker.EnqueueFeedback(sessionId, req.Comment, req.QuotedText, req.ConversationId, req.LocationContext);
     return Results.Accepted($"/api/sessions/{sessionId}/feedback/{item.Id}", new
     {
         item,

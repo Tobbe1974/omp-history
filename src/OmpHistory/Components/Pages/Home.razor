@@ -873,13 +873,14 @@
                                 }
 
                                 <textarea id="word-comment-textarea"
+                                          @key="_feedbackOpenNonce"
                                           class="word-comment-textarea"
                                           rows="3"
                                           placeholder="Add comment… (Shift+Enter: Add to batch • Ctrl+Enter: Send)"
                                           @bind="_feedbackComment"
                                           @bind:event="oninput"
-                                          @onkeydown="HandleFeedbackKeyDown"></textarea>
-
+                                          @onkeydown="HandleFeedbackKeyDown"
+                                          @onkeydown:preventDefault="@_feedbackPreventKeyDefault"></textarea>
                                 <div class="word-comment-footer">
                                     <button type="button"
                                             class="word-comment-btn word-comment-btn-cancel"
@@ -1010,6 +1011,8 @@
     private bool _isPanesPinned = true;
 
     private bool _isFeedbackOpen;
+    private int _feedbackOpenNonce;
+    private bool _feedbackPreventKeyDefault;
     private string _feedbackComment = string.Empty;
     private string? _feedbackQuotedText;
     private string? _feedbackLocationContext;
@@ -1264,6 +1267,7 @@
         {
             _feedbackDrafts.Clear();
             _isFeedbackBatchExpanded = false;
+            CloseFeedbackCard();
         }
         _selectedSessionId = sessionId;
         LoadConversationsForSelectedSession(selectFirst: true);
@@ -1302,6 +1306,7 @@
         _selectedConversationId = conversationId;
         _turnFileFilter = string.Empty;
         _isGitCompareOpen = false;
+        CloseFeedbackCard();
     }
 
     private void ToggleSettings()
@@ -1597,6 +1602,9 @@
             // ignore JS interop failures
         }
 
+        _feedbackComment = string.Empty;
+        _feedbackPreventKeyDefault = false;
+        _feedbackOpenNonce++;
         _feedbackQuotedText = string.IsNullOrWhiteSpace(selectedText) ? null : selectedText.Trim();
         _feedbackLocationContext = string.IsNullOrWhiteSpace(locationContext) ? null : locationContext.Trim();
         _feedbackTopPx = (int)Math.Clamp(e.ClientY - 24, 68, 480);
@@ -1622,15 +1630,22 @@
     {
         if (e.Key == "Enter" && (e.CtrlKey || e.MetaKey))
         {
+            _feedbackPreventKeyDefault = true;
             SubmitFeedback();
         }
         else if (e.Key == "Enter" && e.ShiftKey)
         {
+            _feedbackPreventKeyDefault = true;
             AddFeedbackToBatch();
         }
         else if (e.Key == "Escape")
         {
+            _feedbackPreventKeyDefault = true;
             CloseFeedbackCard();
+        }
+        else
+        {
+            _feedbackPreventKeyDefault = false;
         }
     }
 
@@ -1710,6 +1725,9 @@
         _feedbackDrafts.Clear();
         _isFeedbackBatchExpanded = false;
         _isFeedbackOpen = false;
+        _feedbackComment = string.Empty;
+        _feedbackQuotedText = null;
+        _feedbackLocationContext = null;
         _feedbackStatusMessage = isActive
             ? $"Sent {count} feedback {(count == 1 ? "comment" : "comments")} to active OMP session"
             : $"Queued {count} feedback {(count == 1 ? "comment" : "comments")} (will deliver when session becomes active)";

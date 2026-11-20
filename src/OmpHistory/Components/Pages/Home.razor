@@ -7,8 +7,8 @@
 @inject HistoryNotifier Notifier
 @inject ActiveSessionTracker SessionTracker
 @inject GitCompareService GitCompare
+@inject NtfyService Ntfy
 @inject IJSRuntime JS
-
 <PageTitle>OMP History</PageTitle>
 
 <div class="history-app">
@@ -175,19 +175,50 @@
                 {
                     <div class="settings-popover" role="dialog" aria-label="Settings">
                         <div class="settings-popover-header">
-                            <span>Settings</span>
+                            <span>Global Settings</span>
                             <button type="button"
                                     class="settings-popover-close"
                                     aria-label="Close settings"
                                     @onclick="ToggleSettings">×</button>
                         </div>
                         <label class="settings-checkbox-row">
-                            <input type="checkbox" @bind="_autoSelectNewConversation" />
+                            <input type="checkbox"
+                                   checked="@_autoSelectNewConversation"
+                                   @onchange="OnAutoSelectChanged" />
                             <span>Auto-select new conversations</span>
                         </label>
+                        <label class="settings-checkbox-row">
+                            <input type="checkbox"
+                                   checked="@_ntfyEnabled"
+                                   @onchange="OnNtfyEnabledChanged" />
+                            <span>Send replies to ntfy</span>
+                        </label>
+                        <div class="settings-ntfy-fields">
+                            <div class="settings-field-group">
+                                <label class="settings-field-label" for="ntfy-server-input">ntfy Server URL</label>
+                                <input id="ntfy-server-input"
+                                       type="text"
+                                       class="settings-text-input"
+                                       placeholder="https://skegriebyavag13.duckdns.org"
+                                       value="@_ntfyServerUrl"
+                                       @onchange="OnNtfyServerUrlChanged" />
+                            </div>
+                            <div class="settings-field-group">
+                                <label class="settings-field-label" for="ntfy-topic-input">ntfy Topic</label>
+                                <input id="ntfy-topic-input"
+                                       type="text"
+                                       class="settings-text-input"
+                                       placeholder="omp-history"
+                                       value="@_ntfyTopic"
+                                       @onchange="OnNtfyTopicChanged" />
+                            </div>
+                            @if (!string.IsNullOrWhiteSpace(_ntfyStatusMessage))
+                            {
+                                <span class="settings-ntfy-status">@_ntfyStatusMessage</span>
+                            }
+                        </div>
                     </div>
                 }
-
                 <button type="button"
                         class="settings-cog-btn @(_isSettingsOpen ? "active" : "")"
                         title="Settings"
@@ -876,7 +907,7 @@
                                           @key="_feedbackOpenNonce"
                                           class="word-comment-textarea"
                                           rows="3"
-                                          placeholder="Add comment… (Shift+Enter: Add to batch • Ctrl+Enter: Send)"
+                                          placeholder="Add comment… (Alt+Enter: Add to batch • Ctrl+Enter: Send)"
                                           @bind="_feedbackComment"
                                           @bind:event="oninput"
                                           @onkeydown="HandleFeedbackKeyDown"
@@ -890,7 +921,7 @@
                                     <button type="button"
                                             class="word-comment-btn word-comment-btn-stage"
                                             disabled="@string.IsNullOrWhiteSpace(_feedbackComment)"
-                                            title="Stage this comment and continue selecting other parts (Shift+Enter)"
+                                            title="Stage this comment and continue selecting other parts (Alt+Enter)"
                                             @onclick="AddFeedbackToBatch">
                                         <span>+ Add to Batch</span>
                                     </button>
@@ -1006,10 +1037,13 @@
 
     private bool _isSettingsOpen;
     private bool _autoSelectNewConversation = true;
+    private bool _ntfyEnabled;
+    private string _ntfyServerUrl = "https://skegriebyavag13.duckdns.org";
+    private string _ntfyTopic = "omp-history";
+    private string? _ntfyStatusMessage;
     private ConversationAddedEvent? _pendingAutoSelect;
     private SessionRecord? _sessionToDelete;
     private bool _isPanesPinned = true;
-
     private bool _isFeedbackOpen;
     private int _feedbackOpenNonce;
     private bool _feedbackPreventKeyDefault;
@@ -1102,6 +1136,7 @@
     {
         Notifier.OnConversationAdded += HandleConversationAdded;
         Notifier.OnChanged += HandleHistoryChanged;
+        LoadGlobalSettings();
         RefreshState();
         _activeStatusTimer = new System.Threading.Timer(_ =>
         {
@@ -1176,6 +1211,7 @@
 
     private void RefreshState()
     {
+        LoadGlobalSettings();
         var pending = _pendingAutoSelect;
         _pendingAutoSelect = null;
 
@@ -1312,6 +1348,59 @@
     private void ToggleSettings()
     {
         _isSettingsOpen = !_isSettingsOpen;
+        _ntfyStatusMessage = null;
+    }
+
+    private void LoadGlobalSettings()
+    {
+        var s = Repository.GetAppSettings();
+        _autoSelectNewConversation = s.AutoSelectNewConversation;
+        _isPanesPinned = s.PinLists;
+        _ntfyEnabled = s.NtfyEnabled;
+        _ntfyServerUrl = s.NtfyServerUrl;
+        _ntfyTopic = s.NtfyTopic;
+    }
+
+    private void PersistGlobalSettings()
+    {
+        var saved = Repository.SaveAppSettings(new AppSettingsRecord(
+            AutoSelectNewConversation: _autoSelectNewConversation,
+            PinLists: _isPanesPinned,
+            NtfyEnabled: _ntfyEnabled,
+            NtfyServerUrl: _ntfyServerUrl,
+            NtfyTopic: _ntfyTopic));
+        _autoSelectNewConversation = saved.AutoSelectNewConversation;
+        _isPanesPinned = saved.PinLists;
+        _ntfyEnabled = saved.NtfyEnabled;
+        _ntfyServerUrl = saved.NtfyServerUrl;
+        _ntfyTopic = saved.NtfyTopic;
+    }
+
+    private void OnAutoSelectChanged(ChangeEventArgs e)
+    {
+        _autoSelectNewConversation = e.Value is bool b ? b : true;
+        PersistGlobalSettings();
+    }
+
+    private void OnNtfyEnabledChanged(ChangeEventArgs e)
+    {
+        _ntfyEnabled = e.Value is bool b && b;
+        PersistGlobalSettings();
+        _ntfyStatusMessage = _ntfyEnabled ? "ntfy notifications enabled" : "ntfy notifications disabled";
+    }
+
+    private void OnNtfyServerUrlChanged(ChangeEventArgs e)
+    {
+        _ntfyServerUrl = e.Value?.ToString() ?? "https://skegriebyavag13.duckdns.org";
+        PersistGlobalSettings();
+        _ntfyStatusMessage = "Saved server URL";
+    }
+
+    private void OnNtfyTopicChanged(ChangeEventArgs e)
+    {
+        _ntfyTopic = e.Value?.ToString() ?? "omp-history";
+        PersistGlobalSettings();
+        _ntfyStatusMessage = "Saved topic";
     }
 
     private void OpenFilterModal()
@@ -1328,8 +1417,8 @@
     private void TogglePanesPinned()
     {
         _isPanesPinned = !_isPanesPinned;
+        PersistGlobalSettings();
     }
-
     private void ToggleGitCompare()
     {
         _isGitCompareOpen = !_isGitCompareOpen;
@@ -1633,7 +1722,7 @@
             _feedbackPreventKeyDefault = true;
             SubmitFeedback();
         }
-        else if (e.Key == "Enter" && e.ShiftKey)
+        else if (e.Key == "Enter" && e.AltKey)
         {
             _feedbackPreventKeyDefault = true;
             AddFeedbackToBatch();

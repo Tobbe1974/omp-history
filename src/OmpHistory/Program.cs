@@ -43,6 +43,8 @@ builder.Services.AddSingleton<HistoryRepository>(sp =>
     return new HistoryRepository(dbPath, notifier);
 });
 builder.Services.AddSingleton<GitCompareService>();
+builder.Services.AddSingleton<NtfyService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<NtfyService>());
 
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
@@ -188,7 +190,12 @@ api.MapGet("/deleted-sessions", (HistoryRepository repo) =>
 api.MapGet("/sessions/{sessionId}/conversations", (string sessionId, HistoryRepository repo) =>
     Results.Ok(repo.GetConversations(sessionId)));
 
-api.MapPost("/conversations", (CreateConversationRequest req, HistoryRepository repo, ActiveSessionTracker tracker) =>
+api.MapPost("/conversations", (
+    CreateConversationRequest req,
+    HttpRequest httpRequest,
+    HistoryRepository repo,
+    ActiveSessionTracker tracker,
+    NtfyService ntfyService) =>
 {
     if (string.IsNullOrWhiteSpace(req.SessionId))
     {
@@ -215,9 +222,34 @@ api.MapPost("/conversations", (CreateConversationRequest req, HistoryRepository 
         tracker.UpdateCopilotQuota(req.CopilotQuota);
     }
 
+    string? publicBaseUrl = null;
+    if (httpRequest.Host.HasValue)
+    {
+        var pathBase = httpRequest.PathBase.HasValue ? httpRequest.PathBase.Value : string.Empty;
+        publicBaseUrl = $"{httpRequest.Scheme}://{httpRequest.Host.Value}{pathBase}".TrimEnd('/');
+    }
+    _ = ntfyService.NotifyTurnCompletedAsync(record, req.Repo, req.SessionName, publicBaseUrl);
+
     return Results.Created($"/api/sessions/{req.SessionId}/conversations/{record.Id}", record);
 });
 
+api.MapGet("/settings", (HistoryRepository repo) =>
+    Results.Ok(repo.GetAppSettings()));
+
+api.MapPut("/settings", (AppSettingsRecord settings, HistoryRepository repo) =>
+    Results.Ok(repo.SaveAppSettings(settings)));
+
+api.MapPost("/ntfy/test", async (HttpRequest httpRequest, NtfyService ntfyService) =>
+{
+    string? publicBaseUrl = null;
+    if (httpRequest.Host.HasValue)
+    {
+        var pathBase = httpRequest.PathBase.HasValue ? httpRequest.PathBase.Value : string.Empty;
+        publicBaseUrl = $"{httpRequest.Scheme}://{httpRequest.Host.Value}{pathBase}".TrimEnd('/');
+    }
+    var (ok, message) = await ntfyService.SendTestNotificationAsync(publicBaseUrl);
+    return ok ? Results.Ok(new { ok = true, message }) : Results.BadRequest(new { ok = false, message });
+});
 api.MapGet("/active-sessions", (ActiveSessionTracker tracker) =>
     Results.Ok(tracker.GetActiveSessionIds()));
 

@@ -1,0 +1,274 @@
+@page "/turn/{ConversationId:long}"
+@rendermode InteractiveServer
+@using Markdig
+@using System.Text.RegularExpressions
+@inject HistoryRepository Repository
+@inject ActiveSessionTracker SessionTracker
+@inject IJSRuntime JS
+
+<PageTitle>
+    @(_details is null
+        ? "OMP Turn View"
+        : $"[{_details.Session.Repo}] Turn #{_details.TurnNumber} • OMP History")
+</PageTitle>
+
+<div class="history-app turn-reader-app">
+    <header class="history-header turn-reader-header">
+        <div class="turn-reader-header-left">
+            <a href="" class="turn-reader-back-btn" title="Back to OMP History">
+                ← Full History
+            </a>
+            <div class="brand">
+                <span class="brand-dot"></span>
+                <span class="brand-title">OMP Turn View</span>
+            </div>
+        </div>
+
+        @if (_details is not null)
+        {
+            var isActive = SessionTracker.IsSessionActive(_details.Session.SessionId);
+            <div class="turn-reader-session-meta">
+                <span class="repo-pill active">@_details.Session.Repo</span>
+                <span class="turn-reader-session-title" title="@_details.Session.Name">@_details.Session.Name</span>
+                <span class="turn-badge">Turn #@_details.TurnNumber / @_details.TotalTurns</span>
+                @if (isActive)
+                {
+                    <span class="session-active-badge" title="Active in OMP terminal">
+                        <span class="session-active-dot"></span>
+                        ACTIVE
+                    </span>
+                }
+            </div>
+        }
+    </header>
+
+    <main class="turn-reader-main">
+        @if (_details is null)
+        {
+            <div class="empty-detail">
+                Conversation turn #@ConversationId was not found.
+            </div>
+        }
+        else
+        {
+            var conv = _details.Conversation;
+            <div class="turn-reader-scroll">
+                <section class="detail-section prompt-section">
+                    <div class="section-label">
+                        <span>USER QUESTION / TASK</span>
+                        <span class="section-timestamp">@FormatFullDateTime(conv.CreatedAt)</span>
+                    </div>
+                    <div class="prompt-box">@conv.Prompt</div>
+                </section>
+
+                <section class="detail-section response-section">
+                    <div class="section-label">
+                        <span>MODEL RESPONSE</span>
+                        <div class="section-label-right">
+                            @if (!string.IsNullOrWhiteSpace(conv.Model))
+                            {
+                                <span class="response-model-badge">@conv.Model</span>
+                            }
+                            <span class="usage-meta-pill @(conv.CreditsUsed.HasValue ? "" : "usage-na")"
+                                  title="@FormatUsageTooltip(conv.CreditsUsed, conv.CostUsd, conv.TotalTokens, conv.Model)">
+                                Credits: @FormatCredits(conv.CreditsUsed)@(conv.TotalTokens.HasValue ? $" • {FormatTokens(conv.TotalTokens.Value)} tok" : "")
+                            </span>
+                        </div>
+                    </div>
+                    <div class="markdown-body">
+                        @((MarkupString)RenderMarkdown(conv.ResponseMd))
+                    </div>
+                </section>
+
+                <section class="detail-section turn-reader-reply-section">
+                    <div class="section-label">
+                        <span>REPLY TO OMP SESSION</span>
+                        @if (SessionTracker.IsSessionActive(_details.Session.SessionId))
+                        {
+                            <span class="turn-reader-reply-hint active">Delivers immediately to active OMP session</span>
+                        }
+                        else
+                        {
+                            <span class="turn-reader-reply-hint">Session offline — will queue until resumed</span>
+                        }
+                    </div>
+
+                    <div class="turn-reader-reply-card">
+                        <textarea class="word-comment-textarea turn-reader-textarea"
+                                  rows="3"
+                                  placeholder="Write a follow-up prompt or feedback for OMP… (Ctrl+Enter to send)"
+                                  @bind="_replyText"
+                                  @bind:event="oninput"
+                                  @onkeydown="HandleReplyKeyDown"></textarea>
+
+                        <div class="turn-reader-reply-footer">
+                            @if (!string.IsNullOrWhiteSpace(_statusMessage))
+                            {
+                                <span class="turn-reader-status-msg">@_statusMessage</span>
+                            }
+                            else
+                            {
+                                <span></span>
+                            }
+                            <button type="button"
+                                    class="word-comment-btn word-comment-btn-post"
+                                    disabled="@string.IsNullOrWhiteSpace(_replyText)"
+                                    @onclick="SendReply">
+                                <span>Send Reply</span>
+                            </button>
+                        </div>
+                    </div>
+                </section>
+            </div>
+        }
+    </main>
+</div>
+
+@code {
+    [Parameter]
+    public long ConversationId { get; set; }
+
+    private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
+        .UseAdvancedExtensions()
+        .Build();
+
+    private static readonly Regex EmbeddedMarkdownBlockRegex = new(
+        @"<pre><code class=""language-(?:markdown|md)"">([\s\S]*?)</code></pre>",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private TurnDetailsRecord? _details;
+    private string _replyText = string.Empty;
+    private string? _statusMessage;
+
+    protected override void OnParametersSet()
+    {
+        _details = Repository.GetTurnDetails(ConversationId);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (_details is not null)
+        {
+            try
+            {
+                await JS.InvokeVoidAsync("ompHistoryRenderMermaid");
+            }
+            catch
+            {
+                // Ignore transient JS interop disconnects
+            }
+        }
+    }
+
+    private void HandleReplyKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && (e.CtrlKey || e.MetaKey))
+        {
+            SendReply();
+        }
+    }
+
+    private void SendReply()
+    {
+        if (_details is null || string.IsNullOrWhiteSpace(_replyText))
+        {
+            return;
+        }
+
+        var trimmed = _replyText.Trim();
+        var sessionId = _details.Session.SessionId;
+        var isActive = SessionTracker.IsSessionActive(sessionId);
+
+        SessionTracker.EnqueueFeedback(
+            sessionId: sessionId,
+            comment: trimmed,
+            quotedText: null,
+            conversationId: _details.Conversation.Id,
+            locationContext: $"Turn #{_details.TurnNumber} Reply");
+
+        _replyText = string.Empty;
+        _statusMessage = isActive
+            ? "Reply sent to active OMP session."
+            : "Reply queued (will deliver when session is active).";
+    }
+
+    private static string RenderMarkdown(string? markdown)
+    {
+        if (string.IsNullOrWhiteSpace(markdown))
+        {
+            return "<em>(Empty response)</em>";
+        }
+        return RenderMarkdownPass(markdown, depth: 0);
+    }
+
+    private static string RenderMarkdownPass(string markdown, int depth)
+    {
+        var html = Markdown.ToHtml(markdown, Pipeline);
+        if (depth >= 2)
+        {
+            return html;
+        }
+
+        return EmbeddedMarkdownBlockRegex.Replace(html, match =>
+        {
+            var innerMarkdown = System.Net.WebUtility.HtmlDecode(match.Groups[1].Value);
+            var innerHtml = RenderMarkdownPass(innerMarkdown, depth + 1);
+            return $"<div class=\"embedded-markdown\">{innerHtml}</div>";
+        });
+    }
+
+    private static string FormatFullDateTime(string iso)
+    {
+        if (DateTimeOffset.TryParse(iso, out var dto))
+        {
+            return dto.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+        }
+        return iso;
+    }
+
+    private static string FormatCredits(double? credits)
+    {
+        if (!credits.HasValue)
+        {
+            return "N/A";
+        }
+        return credits.Value.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatTokens(long tokens)
+    {
+        if (tokens >= 1_000_000)
+        {
+            return $"{(tokens / 1_000_000.0).ToString("0.1", System.Globalization.CultureInfo.InvariantCulture)}M";
+        }
+        if (tokens >= 1_000)
+        {
+            return $"{(tokens / 1_000.0).ToString("0.1", System.Globalization.CultureInfo.InvariantCulture)}k";
+        }
+        return tokens.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static string FormatUsageTooltip(double? credits, double? costUsd, long? totalTokens, string? model = null)
+    {
+        if (!credits.HasValue && !costUsd.HasValue && !totalTokens.HasValue)
+        {
+            return "Usage data: N/A";
+        }
+
+        var parts = new List<string>(4);
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+            parts.Add($"Model: {model}");
+        }
+        parts.Add($"Credits: {(credits.HasValue ? credits.Value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) : "N/A")}");
+        if (costUsd.HasValue)
+        {
+            parts.Add($"Est. Cost: ${costUsd.Value.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture)}");
+        }
+        if (totalTokens.HasValue)
+        {
+            parts.Add($"Tokens: {totalTokens.Value:N0}");
+        }
+        return string.Join(" • ", parts);
+    }
+}

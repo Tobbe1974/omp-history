@@ -73,6 +73,11 @@ public sealed class HistoryRepository
                 session_id TEXT PRIMARY KEY,
                 deleted_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """;
         cmd.ExecuteNonQuery();
 
@@ -661,6 +666,152 @@ public sealed class HistoryRepository
                 reader.IsDBNull(11) ? null : reader.GetString(11)));
         }
         return list;
+    }
+
+    public TurnDetailsRecord? GetTurnDetails(long conversationId)
+    {
+        ConversationRecord? target = null;
+        string? sessionId = null;
+
+        using (var conn = OpenConnection())
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT id, session_id, prompt, response_md, created_at, diff_patch, git_tree_before, git_tree_after, credits_used, cost_usd, total_tokens, model
+                FROM conversations
+                WHERE id = $id
+                LIMIT 1;
+                """;
+            cmd.Parameters.AddWithValue("$id", conversationId);
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read())
+            {
+                sessionId = reader.GetString(1);
+                target = new ConversationRecord(
+                    reader.GetInt64(0),
+                    sessionId,
+                    reader.GetString(2),
+                    reader.GetString(3),
+                    reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.IsDBNull(8) ? null : reader.GetDouble(8),
+                    reader.IsDBNull(9) ? null : reader.GetDouble(9),
+                    reader.IsDBNull(10) ? null : reader.GetInt64(10),
+                    reader.IsDBNull(11) ? null : reader.GetString(11));
+            }
+        }
+
+        if (target is null || string.IsNullOrWhiteSpace(sessionId))
+        {
+            return null;
+        }
+
+        var session = GetSession(sessionId);
+        if (session is null)
+        {
+            return null;
+        }
+
+        var allInSession = GetConversations(sessionId);
+        var turnNumber = 1;
+        for (var i = 0; i < allInSession.Count; i++)
+        {
+            if (allInSession[i].Id == conversationId)
+            {
+                turnNumber = i + 1;
+                break;
+            }
+        }
+
+        return new TurnDetailsRecord(target, session, turnNumber, Math.Max(allInSession.Count, turnNumber));
+    }
+
+    public AppSettingsRecord GetAppSettings()
+    {
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        using (var conn = OpenConnection())
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT key, value FROM app_settings;";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                dict[reader.GetString(0)] = reader.GetString(1);
+            }
+        }
+
+        var autoSelect = !dict.TryGetValue("auto_select_new_conversation", out var autoStr)
+            || !bool.TryParse(autoStr, out var parsedAuto)
+            || parsedAuto;
+        var pinLists = !dict.TryGetValue("pin_lists", out var pinStr)
+            || !bool.TryParse(pinStr, out var parsedPin)
+            || parsedPin;
+        var ntfyEnabled = dict.TryGetValue("ntfy_enabled", out var ntfyEnStr)
+            && bool.TryParse(ntfyEnStr, out var parsedNtfy)
+            && parsedNtfy;
+        var ntfyServerUrl = dict.TryGetValue("ntfy_server_url", out var srv) && !string.IsNullOrWhiteSpace(srv)
+            ? srv.Trim().TrimEnd('/')
+            : "https://skegriebyavag13.duckdns.org";
+        var ntfyTopic = dict.TryGetValue("ntfy_topic", out var top) && !string.IsNullOrWhiteSpace(top)
+            ? top.Trim().Trim('/')
+            : "omp-history";
+
+        return new AppSettingsRecord(
+            AutoSelectNewConversation: autoSelect,
+            PinLists: pinLists,
+            NtfyEnabled: ntfyEnabled,
+            NtfyServerUrl: ntfyServerUrl,
+            NtfyTopic: ntfyTopic);
+    }
+
+    public AppSettingsRecord SaveAppSettings(AppSettingsRecord settings)
+    {
+        var normalizedServer = string.IsNullOrWhiteSpace(settings.NtfyServerUrl)
+            ? "https://skegriebyavag13.duckdns.org"
+            : settings.NtfyServerUrl.Trim().TrimEnd('/');
+        var normalizedTopic = string.IsNullOrWhiteSpace(settings.NtfyTopic)
+            ? "omp-history"
+            : settings.NtfyTopic.Trim().Trim('/');
+
+        var normalized = new AppSettingsRecord(
+            AutoSelectNewConversation: settings.AutoSelectNewConversation,
+            PinLists: settings.PinLists,
+            NtfyEnabled: settings.NtfyEnabled,
+            NtfyServerUrl: normalizedServer,
+            NtfyTopic: normalizedTopic);
+
+        var pairs = new (string Key, string Value)[]
+        {
+            ("auto_select_new_conversation", normalized.AutoSelectNewConversation ? "true" : "false"),
+            ("pin_lists", normalized.PinLists ? "true" : "false"),
+            ("ntfy_enabled", normalized.NtfyEnabled ? "true" : "false"),
+            ("ntfy_server_url", normalized.NtfyServerUrl),
+            ("ntfy_topic", normalized.NtfyTopic)
+        };
+
+        using (var conn = OpenConnection())
+        using (var tx = conn.BeginTransaction())
+        {
+            foreach (var (key, val) in pairs)
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = """
+                    INSERT INTO app_settings (key, value)
+                    VALUES ($key, $val)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+                    """;
+                cmd.Parameters.AddWithValue("$key", key);
+                cmd.Parameters.AddWithValue("$val", val);
+                cmd.ExecuteNonQuery();
+            }
+            tx.Commit();
+        }
+
+        _notifier.NotifyChanged();
+        return normalized;
     }
 
     private static string FirstLinePreview(string text, int maxLen)

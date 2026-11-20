@@ -273,7 +273,7 @@
                     if (!textarea._ompKeyGuardAttached) {
                         textarea._ompKeyGuardAttached = true;
                         textarea.addEventListener('keydown', (ev) => {
-                            if (ev.key === 'Enter' && (ev.shiftKey || ev.ctrlKey || ev.metaKey)) {
+                            if (ev.key === 'Enter' && (ev.altKey || ev.ctrlKey || ev.metaKey)) {
                                 ev.preventDefault();
                             }
                         });

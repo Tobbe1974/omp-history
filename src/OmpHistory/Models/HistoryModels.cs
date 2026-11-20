@@ -95,6 +95,19 @@ public sealed record ActiveSessionHeartbeatRequest(
     string? RepoPath = null,
     CopilotQuotaSnapshot? CopilotQuota = null);
 
+
+public sealed record AppSettingsRecord(
+    bool AutoSelectNewConversation,
+    bool PinLists,
+    bool NtfyEnabled,
+    string NtfyServerUrl,
+    string NtfyTopic);
+
+public sealed record TurnDetailsRecord(
+    ConversationRecord Conversation,
+    SessionRecord Session,
+    int TurnNumber,
+    int TotalTurns);
 public sealed record GitCommitInfo(
     string Hash,
     string ShortHash,

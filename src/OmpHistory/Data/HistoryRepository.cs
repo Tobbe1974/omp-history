@@ -9,7 +9,8 @@ public sealed class HistoryRepository
 {
     private readonly string _connectionString;
     private readonly OmpHistory.Services.HistoryNotifier _notifier;
-
+    private readonly object _settingsLock = new();
+    private AppSettingsRecord? _cachedSettings;
     public HistoryRepository(string dbPath, OmpHistory.Services.HistoryNotifier notifier)
     {
         var fullPath = Path.GetFullPath(dbPath);
@@ -800,48 +801,63 @@ public sealed class HistoryRepository
 
     public AppSettingsRecord GetAppSettings()
     {
-        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        using (var conn = OpenConnection())
-        using (var cmd = conn.CreateCommand())
+        var cached = _cachedSettings;
+        if (cached is not null)
         {
-            cmd.CommandText = "SELECT key, value FROM app_settings;";
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
-            {
-                dict[reader.GetString(0)] = reader.GetString(1);
-            }
+            return cached;
         }
 
-        var autoSelect = !dict.TryGetValue("auto_select_new_conversation", out var autoStr)
-            || !bool.TryParse(autoStr, out var parsedAuto)
-            || parsedAuto;
-        var pinLists = !dict.TryGetValue("pin_lists", out var pinStr)
-            || !bool.TryParse(pinStr, out var parsedPin)
-            || parsedPin;
-        var ntfyEnabled = dict.TryGetValue("ntfy_enabled", out var ntfyEnStr)
-            && bool.TryParse(ntfyEnStr, out var parsedNtfy)
-            && parsedNtfy;
-        var ntfyServerUrl = dict.TryGetValue("ntfy_server_url", out var srv) && !string.IsNullOrWhiteSpace(srv)
-            ? srv.Trim().TrimEnd('/')
-            : "https://skegriebyavag13.duckdns.org";
-        var ntfyTopic = dict.TryGetValue("ntfy_topic", out var top) && !string.IsNullOrWhiteSpace(top)
-            ? top.Trim().Trim('/')
-            : "omp-history";
-        var askBeforeDeleteSession = !dict.TryGetValue("ask_before_delete_session", out var askSessStr)
-            || !bool.TryParse(askSessStr, out var parsedAskSess)
-            || parsedAskSess;
-        var askBeforeDeleteSuggestion = !dict.TryGetValue("ask_before_delete_suggestion", out var askSugStr)
-            || !bool.TryParse(askSugStr, out var parsedAskSug)
-            || parsedAskSug;
+        lock (_settingsLock)
+        {
+            if (_cachedSettings is not null)
+            {
+                return _cachedSettings;
+            }
 
-        return new AppSettingsRecord(
-            AutoSelectNewConversation: autoSelect,
-            PinLists: pinLists,
-            NtfyEnabled: ntfyEnabled,
-            NtfyServerUrl: ntfyServerUrl,
-            NtfyTopic: ntfyTopic,
-            AskBeforeDeleteSession: askBeforeDeleteSession,
-            AskBeforeDeleteSuggestion: askBeforeDeleteSuggestion);
+            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            using (var conn = OpenConnection())
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT key, value FROM app_settings;";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    dict[reader.GetString(0)] = reader.GetString(1);
+                }
+            }
+
+            var autoSelect = !dict.TryGetValue("auto_select_new_conversation", out var autoStr)
+                || !bool.TryParse(autoStr, out var parsedAuto)
+                || parsedAuto;
+            var pinLists = !dict.TryGetValue("pin_lists", out var pinStr)
+                || !bool.TryParse(pinStr, out var parsedPin)
+                || parsedPin;
+            var ntfyEnabled = dict.TryGetValue("ntfy_enabled", out var ntfyEnStr)
+                && bool.TryParse(ntfyEnStr, out var parsedNtfy)
+                && parsedNtfy;
+            var ntfyServerUrl = dict.TryGetValue("ntfy_server_url", out var srv) && !string.IsNullOrWhiteSpace(srv)
+                ? srv.Trim().TrimEnd('/')
+                : "https://skegriebyavag13.duckdns.org";
+            var ntfyTopic = dict.TryGetValue("ntfy_topic", out var top) && !string.IsNullOrWhiteSpace(top)
+                ? top.Trim().Trim('/')
+                : "omp-history";
+            var askBeforeDeleteSession = !dict.TryGetValue("ask_before_delete_session", out var askSessStr)
+                || !bool.TryParse(askSessStr, out var parsedAskSess)
+                || parsedAskSess;
+            var askBeforeDeleteSuggestion = !dict.TryGetValue("ask_before_delete_suggestion", out var askSugStr)
+                || !bool.TryParse(askSugStr, out var parsedAskSug)
+                || parsedAskSug;
+
+            _cachedSettings = new AppSettingsRecord(
+                AutoSelectNewConversation: autoSelect,
+                PinLists: pinLists,
+                NtfyEnabled: ntfyEnabled,
+                NtfyServerUrl: ntfyServerUrl,
+                NtfyTopic: ntfyTopic,
+                AskBeforeDeleteSession: askBeforeDeleteSession,
+                AskBeforeDeleteSuggestion: askBeforeDeleteSuggestion);
+            return _cachedSettings;
+        }
     }
 
     public AppSettingsRecord SaveAppSettings(AppSettingsRecord settings)
@@ -892,7 +908,12 @@ public sealed class HistoryRepository
             tx.Commit();
         }
 
-        _notifier.NotifyChanged();
+        lock (_settingsLock)
+        {
+            _cachedSettings = normalized;
+        }
+
+        _notifier.NotifySettingsChanged();
         return normalized;
     }
 

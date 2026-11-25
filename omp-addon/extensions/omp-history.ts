@@ -1,8 +1,35 @@
-import { spawn, spawnSync } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 
+const execFileAsync = promisify(execFile);
+
+async function runCommandAsync(
+  cmd: string,
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number } = {},
+): Promise<{ status: number; stdout: string; stderr: string }> {
+  try {
+    const { stdout, stderr } = await execFileAsync(cmd, args, {
+      cwd: options.cwd,
+      env: options.env,
+      encoding: "utf8",
+      timeout: options.timeout ?? 4000,
+      maxBuffer: options.maxBuffer ?? 1024 * 1024,
+      windowsHide: true,
+    });
+    return { status: 0, stdout: stdout || "", stderr: stderr || "" };
+  } catch (err: unknown) {
+    const e = err as { code?: number | string; stdout?: string; stderr?: string };
+    return {
+      status: typeof e?.code === "number" ? e.code : 1,
+      stdout: typeof e?.stdout === "string" ? e.stdout : "",
+      stderr: typeof e?.stderr === "string" ? e.stderr : "",
+    };
+  }
+}
 const DEFAULT_PROJECT_DIR = "/mnt/div/Projects/omp-history/src/OmpHistory";
 
 export function resolveBaseUrl(): string | undefined {
@@ -397,7 +424,7 @@ export function resolveRepoName(cwd: string): string {
   return fallback || "unknown";
 }
 
-export function captureGitTreeSnapshot(cwd: string): string | undefined {
+export async function captureGitTreeSnapshot(cwd: string): Promise<string | undefined> {
   try {
     const gitConfigPath = findGitConfigPath(cwd);
     if (!gitConfigPath) return undefined;
@@ -408,18 +435,16 @@ export function captureGitTreeSnapshot(cwd: string): string | undefined {
     );
     try {
       const env = { ...process.env, GIT_INDEX_FILE: tmpIndex };
-      const addRes = spawnSync("git", ["add", "-A"], {
+      const addRes = await runCommandAsync("git", ["add", "-A"], {
         cwd: repoRoot,
         env,
-        encoding: "utf8",
         timeout: 4000,
       });
       if (addRes.status !== 0) return undefined;
 
-      const treeRes = spawnSync("git", ["write-tree"], {
+      const treeRes = await runCommandAsync("git", ["write-tree"], {
         cwd: repoRoot,
         env,
-        encoding: "utf8",
         timeout: 4000,
       });
       if (treeRes.status !== 0) return undefined;
@@ -440,13 +465,12 @@ export function captureGitTreeSnapshot(cwd: string): string | undefined {
   }
 }
 
-export function computeGitTreeDiff(cwd: string, treeBefore?: string, treeAfter?: string): string | undefined {
+export async function computeGitTreeDiff(cwd: string, treeBefore?: string, treeAfter?: string): Promise<string | undefined> {
   if (!treeBefore || !treeAfter || treeBefore === treeAfter) return undefined;
   try {
     const repoRoot = resolveRepoRootPath(cwd);
-    const diffRes = spawnSync("git", ["diff", "--unified=3", treeBefore, treeAfter], {
+    const diffRes = await runCommandAsync("git", ["diff", "--unified=3", treeBefore, treeAfter], {
       cwd: repoRoot,
-      encoding: "utf8",
       timeout: 5000,
       maxBuffer: 4 * 1024 * 1024,
     });
@@ -539,15 +563,12 @@ export function extractUsageMetricsFromMessages(messages: SessionEntryRecord[]):
   };
 }
 
-export function fetchCopilotQuotaSnapshot(): CopilotQuotaSnapshot | undefined {
+export async function fetchCopilotQuotaSnapshot(): Promise<CopilotQuotaSnapshot | undefined> {
   try {
-    const res = spawnSync("gh", ["api", "/copilot_internal/user"], {
-      encoding: "utf8",
+    const res = await runCommandAsync("gh", ["api", "/copilot_internal/user"], {
       timeout: 3500,
-      stdio: ["ignore", "pipe", "ignore"],
     });
     if (res.status !== 0 || !res.stdout) return undefined;
-
     const parsed = JSON.parse(res.stdout) as {
       copilot_plan?: string;
       quota_reset_date?: string;
@@ -971,7 +992,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
         latestUserPrompt = msg;
         promptInFlight = true;
-        turnTreeBefore = captureGitTreeSnapshot(effectiveCwd);
+        turnTreeBefore = await captureGitTreeSnapshot(effectiveCwd);
 
         if (typeof pi.sendUserMessage === "function") {
           pi.sendUserMessage(msg);
@@ -992,7 +1013,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
       return;
     }
     await syncSessionRegistration(ctx);
-    const initialQuota = fetchCopilotQuotaSnapshot();
+    const initialQuota = await fetchCopilotQuotaSnapshot();
     if (initialQuota) {
       const sessionId = readSessionId(ctx);
       const baseUrl = resolveBaseUrl();
@@ -1052,8 +1073,8 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
     if (!text.startsWith("/")) {
       latestUserPrompt = text;
-      turnTreeBefore = captureGitTreeSnapshot(ctx?.cwd || process.cwd());
       promptInFlight = true;
+      turnTreeBefore = await captureGitTreeSnapshot(ctx?.cwd || process.cwd());
     }
   });
 
@@ -1070,9 +1091,9 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
       }
     }
     if (!turnTreeBefore) {
-      turnTreeBefore = captureGitTreeSnapshot(ctx?.cwd || process.cwd());
+      turnTreeBefore = await captureGitTreeSnapshot(ctx?.cwd || process.cwd());
     }
-    turnQuotaBefore = fetchCopilotQuotaSnapshot();
+    turnQuotaBefore = await fetchCopilotQuotaSnapshot();
     await checkAndSyncSessionRename(ctx);
   });
 
@@ -1121,13 +1142,14 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
     const treeBefore = turnTreeBefore;
     turnTreeBefore = undefined;
-    const treeAfter = captureGitTreeSnapshot(effectiveCwd);
-    const diffPatch = computeGitTreeDiff(effectiveCwd, treeBefore, treeAfter);
+    const [treeAfter, copilotQuota] = await Promise.all([
+      captureGitTreeSnapshot(effectiveCwd),
+      fetchCopilotQuotaSnapshot(),
+    ]);
+    const diffPatch = await computeGitTreeDiff(effectiveCwd, treeBefore, treeAfter);
     const turnUsage = fromEvent ?? fromBranch;
     const quotaBefore = turnQuotaBefore;
     turnQuotaBefore = undefined;
-    const copilotQuota = fetchCopilotQuotaSnapshot();
-
     let measuredCredits = turnUsage?.creditsUsed;
     if (quotaBefore && copilotQuota && copilotQuota.entitlement === quotaBefore.entitlement) {
       const exactDelta = Math.round((copilotQuota.creditsUsed - quotaBefore.creditsUsed) * 10) / 10;

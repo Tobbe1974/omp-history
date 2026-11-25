@@ -10,30 +10,65 @@ public sealed class NtfyService : BackgroundService
 {
     private const string OutboundTag = "omp-out";
     private const string DefaultPublicAppBaseUrl = "https://skegriebyavag13.duckdns.org/omp-history";
+    private const int MaxTrackedSentIds = 256;
 
     private readonly HistoryRepository _repository;
     private readonly ActiveSessionTracker _sessionTracker;
+    private readonly HistoryNotifier _notifier;
     private readonly IConfiguration _configuration;
     private readonly ILogger<NtfyService> _logger;
     private readonly HttpClient _httpClient;
     private readonly ConcurrentDictionary<string, byte> _sentMessageIds = new(StringComparer.Ordinal);
+    private readonly ConcurrentQueue<string> _sentMessageOrder = new();
+    private readonly object _streamCtsLock = new();
+    private CancellationTokenSource? _activeStreamCts;
     private string? _lastNotifiedSessionId;
     private long? _lastNotifiedConversationId;
 
     public NtfyService(
         HistoryRepository repository,
         ActiveSessionTracker sessionTracker,
+        HistoryNotifier notifier,
         IConfiguration configuration,
         ILogger<NtfyService> logger)
     {
         _repository = repository;
         _sessionTracker = sessionTracker;
+        _notifier = notifier;
         _configuration = configuration;
         _logger = logger;
         _httpClient = new HttpClient
         {
             Timeout = Timeout.InfiniteTimeSpan
         };
+        _notifier.OnSettingsChanged += HandleSettingsChanged;
+    }
+
+    private void HandleSettingsChanged()
+    {
+        lock (_streamCtsLock)
+        {
+            try
+            {
+                _activeStreamCts?.Cancel();
+            }
+            catch
+            {
+                // ignore disposed cts
+            }
+        }
+    }
+
+    private void TrackSentMessageId(string id)
+    {
+        if (_sentMessageIds.TryAdd(id, 1))
+        {
+            _sentMessageOrder.Enqueue(id);
+            while (_sentMessageOrder.Count > MaxTrackedSentIds && _sentMessageOrder.TryDequeue(out var oldest))
+            {
+                _sentMessageIds.TryRemove(oldest, out _);
+            }
+        }
     }
 
     public async Task NotifyTurnCompletedAsync(
@@ -169,7 +204,7 @@ public sealed class NtfyService : BackgroundService
                 var id = idProp.GetString();
                 if (!string.IsNullOrWhiteSpace(id))
                 {
-                    _sentMessageIds[id] = 1;
+                    TrackSentMessageId(id);
                 }
             }
         }
@@ -181,82 +216,104 @@ public sealed class NtfyService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                var settings = _repository.GetAppSettings();
-                var serverUrl = NormalizeServerUrl(settings.NtfyServerUrl);
-                var topic = NormalizeTopic(settings.NtfyTopic);
-
-                if (string.IsNullOrWhiteSpace(serverUrl) || string.IsNullOrWhiteSpace(topic))
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-                    continue;
-                }
-
-                // Prefer loopback when subscribing to our local ntfy server on the Pi
-                var streamBaseUrl = IsSelfHostedPiUrl(serverUrl)
-                    ? "http://127.0.0.1:8090"
-                    : serverUrl;
-                var streamUrl = $"{streamBaseUrl}/{Uri.EscapeDataString(topic)}/json";
-
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                using var req = new HttpRequestMessage(HttpMethod.Get, streamUrl);
-                using var response = await _httpClient.SendAsync(
-                    req,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    linkedCts.Token);
-
-                if (!response.IsSuccessStatusCode)
+                lock (_streamCtsLock)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
-                    continue;
+                    _activeStreamCts = linkedCts;
                 }
 
-                await using var stream = await response.Content.ReadAsStreamAsync(linkedCts.Token);
-                using var reader = new StreamReader(stream, Encoding.UTF8);
-
-                while (!stoppingToken.IsCancellationRequested)
+                try
                 {
-                    // Re-check if user changed server or topic in settings
-                    var currentSettings = _repository.GetAppSettings();
-                    if (!string.Equals(NormalizeServerUrl(currentSettings.NtfyServerUrl), serverUrl, StringComparison.OrdinalIgnoreCase)
-                        || !string.Equals(NormalizeTopic(currentSettings.NtfyTopic), topic, StringComparison.Ordinal))
-                    {
-                        break;
-                    }
+                    var settings = _repository.GetAppSettings();
+                    var serverUrl = NormalizeServerUrl(settings.NtfyServerUrl);
+                    var topic = NormalizeTopic(settings.NtfyTopic);
 
-                    var line = await reader.ReadLineAsync(stoppingToken);
-                    if (line is null)
+                    if (!settings.NtfyEnabled || string.IsNullOrWhiteSpace(serverUrl) || string.IsNullOrWhiteSpace(topic))
                     {
-                        break;
-                    }
-
-                    if (string.IsNullOrWhiteSpace(line))
-                    {
+                        await Task.Delay(Timeout.InfiniteTimeSpan, linkedCts.Token);
                         continue;
                     }
 
-                    HandleIncomingNtfyJsonLine(line);
+                    // Prefer loopback when subscribing to our local ntfy server on the Pi
+                    var streamBaseUrl = IsSelfHostedPiUrl(serverUrl)
+                        ? "http://127.0.0.1:8090"
+                        : serverUrl;
+                    var streamUrl = $"{streamBaseUrl}/{Uri.EscapeDataString(topic)}/json";
+
+                    using var req = new HttpRequestMessage(HttpMethod.Get, streamUrl);
+                    using var response = await _httpClient.SendAsync(
+                        req,
+                        HttpCompletionOption.ResponseHeadersRead,
+                        linkedCts.Token);
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(5), linkedCts.Token);
+                        continue;
+                    }
+
+                    await using var stream = await response.Content.ReadAsStreamAsync(linkedCts.Token);
+                    using var reader = new StreamReader(stream, Encoding.UTF8);
+
+                    while (!linkedCts.Token.IsCancellationRequested)
+                    {
+                        var line = await reader.ReadLineAsync(linkedCts.Token);
+                        if (line is null)
+                        {
+                            break;
+                        }
+
+                        if (string.IsNullOrWhiteSpace(line))
+                        {
+                            continue;
+                        }
+
+                        HandleIncomingNtfyJsonLine(line);
+                    }
                 }
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "ntfy subscription loop reconnecting after error");
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(4), stoppingToken);
-                }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
                     break;
                 }
+                catch (OperationCanceledException)
+                {
+                    // Settings changed; loop immediately with updated settings
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "ntfy subscription loop reconnecting after error");
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(4), linkedCts.Token);
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Settings changed during backoff
+                    }
+                }
+                finally
+                {
+                    lock (_streamCtsLock)
+                    {
+                        if (ReferenceEquals(_activeStreamCts, linkedCts))
+                        {
+                            _activeStreamCts = null;
+                        }
+                    }
+                }
             }
+        }
+        finally
+        {
+            _notifier.OnSettingsChanged -= HandleSettingsChanged;
         }
     }
 

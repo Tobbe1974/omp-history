@@ -604,7 +604,18 @@ public sealed class GitCompareService
 
             var stdoutTask = proc.StandardOutput.ReadToEndAsync();
             var stderrTask = proc.StandardError.ReadToEndAsync();
-            proc.WaitForExit(8000);
+            if (!proc.WaitForExit(8000))
+            {
+                try
+                {
+                    proc.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // ignore kill race
+                }
+                return (-1, string.Empty, "git command timed out after 8 seconds.");
+            }
 
             return (proc.ExitCode, stdoutTask.GetAwaiter().GetResult(), stderrTask.GetAwaiter().GetResult());
         }

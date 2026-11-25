@@ -805,7 +805,7 @@
                             <span class="section-timestamp">@FormatTimestamp(SelectedSuggestion.CreatedAt)</span>
                         </div>
                         <div class="markdown-body">
-                            @((MarkupString)RenderMarkdown(SelectedSuggestion.HumanSummary))
+                            @((MarkupString)GetCachedSuggestionHumanHtml(SelectedSuggestion))
                         </div>
                     </section>
 
@@ -816,7 +816,7 @@
                                 <span>AGENT IMPLEMENTATION CONTEXT</span>
                             </div>
                             <div class="markdown-body">
-                                @((MarkupString)RenderMarkdown(SelectedSuggestion.AgentContext))
+                                @((MarkupString)GetCachedSuggestionAgentHtml(SelectedSuggestion))
                             </div>
                         </section>
                     }
@@ -874,7 +874,7 @@
                             }
                         </div>
                         <div class="markdown-body" @key="SelectedConversation.Id">
-                            @((MarkupString)RenderMarkdown(SelectedConversation.ResponseMd))
+                            @((MarkupString)GetCachedConversationHtml(SelectedConversation))
                         </div>
                     </section>
 
@@ -1277,7 +1277,19 @@
     private GitDiffResult? _gitDiffResult;
     private bool _gitDiffNeedsRender;
     private string _turnFileFilter = string.Empty;
-
+    private long? _lastJsRenderedConversationId;
+    private long? _lastJsRenderedSuggestionId;
+    private string? _lastJsRenderedLeftPaneTab;
+    private string? _lastJsRenderedTurnFilter;
+    private string? _lastJsRenderedTurnFormat;
+    private long? _cachedMdConversationId;
+    private string? _cachedMdConversationSource;
+    private string _cachedMdConversationHtml = string.Empty;
+    private long? _cachedMdSuggestionId;
+    private string? _cachedMdSuggestionHumanSource;
+    private string _cachedMdSuggestionHumanHtml = string.Empty;
+    private string? _cachedMdSuggestionAgentSource;
+    private string _cachedMdSuggestionAgentHtml = string.Empty;
 
     private bool IsSelectedSessionActive => SessionTracker.IsSessionActive(_selectedSessionId);
 
@@ -1393,28 +1405,61 @@
                 // Ignore transient JS interop disconnects
             }
         }
-        else if (!_isGitCompareOpen && SelectedConversation is not null)
+        else if (!_isGitCompareOpen && _leftPaneTab == "suggestions" && SelectedSuggestion is not null)
         {
-            try
+            if (_lastJsRenderedLeftPaneTab != _leftPaneTab || _lastJsRenderedSuggestionId != SelectedSuggestion.Id)
             {
-                await JS.InvokeVoidAsync("ompHistoryRenderMermaid");
-                if (!string.IsNullOrWhiteSpace(SelectedConversation.DiffPatch))
+                _lastJsRenderedLeftPaneTab = _leftPaneTab;
+                _lastJsRenderedSuggestionId = SelectedSuggestion.Id;
+                try
                 {
-                    var turnDiff = GitCompareService.ParseUnifiedDiff(
-                        SelectedConversation.DiffPatch,
-                        "Turn Changes",
-                        _turnFileFilter);
-                    await JS.InvokeVoidAsync(
-                        "ompHistoryRenderGitDiff",
-                        "omp-turn-diff-container",
-                        turnDiff.RawDiff,
-                        _gitOutputFormat,
-                        turnDiff.ChangedFiles.Count > 1);
+                    await JS.InvokeVoidAsync("ompHistoryRenderMermaid");
+                }
+                catch
+                {
+                    // Ignore transient JS interop disconnects
                 }
             }
-            catch
+        }
+        else if (!_isGitCompareOpen && SelectedConversation is not null)
+        {
+            var convChanged = _lastJsRenderedLeftPaneTab != _leftPaneTab
+                || _lastJsRenderedConversationId != SelectedConversation.Id;
+            var diffChanged = convChanged
+                || _lastJsRenderedTurnFilter != _turnFileFilter
+                || _lastJsRenderedTurnFormat != _gitOutputFormat;
+
+            if (convChanged || diffChanged)
             {
-                // Ignore transient JS interop disconnects
+                _lastJsRenderedLeftPaneTab = _leftPaneTab;
+                _lastJsRenderedConversationId = SelectedConversation.Id;
+                _lastJsRenderedTurnFilter = _turnFileFilter;
+                _lastJsRenderedTurnFormat = _gitOutputFormat;
+
+                try
+                {
+                    if (convChanged)
+                    {
+                        await JS.InvokeVoidAsync("ompHistoryRenderMermaid");
+                    }
+                    if (diffChanged && !string.IsNullOrWhiteSpace(SelectedConversation.DiffPatch))
+                    {
+                        var turnDiff = GitCompareService.ParseUnifiedDiff(
+                            SelectedConversation.DiffPatch,
+                            "Turn Changes",
+                            _turnFileFilter);
+                        await JS.InvokeVoidAsync(
+                            "ompHistoryRenderGitDiff",
+                            "omp-turn-diff-container",
+                            turnDiff.RawDiff,
+                            _gitOutputFormat,
+                            turnDiff.ChangedFiles.Count > 1);
+                    }
+                }
+                catch
+                {
+                    // Ignore transient JS interop disconnects
+                }
             }
         }
     }
@@ -2232,6 +2277,50 @@
             _selectedConversationId = null;
         }
         Repository.DeleteSession(sessionId);
+    }
+
+    private string GetCachedConversationHtml(ConversationRecord conv)
+    {
+        if (_cachedMdConversationId == conv.Id && string.Equals(_cachedMdConversationSource, conv.ResponseMd, StringComparison.Ordinal))
+        {
+            return _cachedMdConversationHtml;
+        }
+        _cachedMdConversationId = conv.Id;
+        _cachedMdConversationSource = conv.ResponseMd;
+        _cachedMdConversationHtml = RenderMarkdown(conv.ResponseMd);
+        return _cachedMdConversationHtml;
+    }
+
+    private string GetCachedSuggestionHumanHtml(SuggestionRecord sug)
+    {
+        if (_cachedMdSuggestionId == sug.Id && string.Equals(_cachedMdSuggestionHumanSource, sug.HumanSummary, StringComparison.Ordinal))
+        {
+            return _cachedMdSuggestionHumanHtml;
+        }
+        if (_cachedMdSuggestionId != sug.Id)
+        {
+            _cachedMdSuggestionId = sug.Id;
+            _cachedMdSuggestionAgentSource = null;
+        }
+        _cachedMdSuggestionHumanSource = sug.HumanSummary;
+        _cachedMdSuggestionHumanHtml = RenderMarkdown(sug.HumanSummary);
+        return _cachedMdSuggestionHumanHtml;
+    }
+
+    private string GetCachedSuggestionAgentHtml(SuggestionRecord sug)
+    {
+        if (_cachedMdSuggestionId == sug.Id && string.Equals(_cachedMdSuggestionAgentSource, sug.AgentContext, StringComparison.Ordinal))
+        {
+            return _cachedMdSuggestionAgentHtml;
+        }
+        if (_cachedMdSuggestionId != sug.Id)
+        {
+            _cachedMdSuggestionId = sug.Id;
+            _cachedMdSuggestionHumanSource = null;
+        }
+        _cachedMdSuggestionAgentSource = sug.AgentContext;
+        _cachedMdSuggestionAgentHtml = RenderMarkdown(sug.AgentContext);
+        return _cachedMdSuggestionAgentHtml;
     }
 
     private static string RenderMarkdown(string? markdown)

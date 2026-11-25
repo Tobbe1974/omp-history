@@ -259,11 +259,13 @@ api.MapGet("/copilot-quota", (ActiveSessionTracker tracker) =>
 
 api.MapPost("/sessions/{sessionId}/heartbeat", async (string sessionId, HttpRequest httpRequest, HistoryRepository repo, ActiveSessionTracker tracker) =>
 {
+    string? hbRepo = null;
     if (httpRequest.ContentLength is > 0)
     {
         try
         {
             var hb = await httpRequest.ReadFromJsonAsync<ActiveSessionHeartbeatRequest>();
+            hbRepo = hb?.Repo;
             if (!string.IsNullOrWhiteSpace(hb?.RepoPath))
             {
                 repo.UpdateSessionRepoPath(sessionId, hb.RepoPath);
@@ -279,10 +281,18 @@ api.MapPost("/sessions/{sessionId}/heartbeat", async (string sessionId, HttpRequ
         }
     }
 
-    tracker.RecordHeartbeat(sessionId);
+    tracker.RecordHeartbeat(sessionId, hbRepo);
     var items = tracker.DequeuePendingFeedback(sessionId);
+    var resumeSessionId = tracker.DequeuePendingResume(sessionId, hbRepo);
     var deletedSessionIds = repo.GetDeletedSessionIds();
-    return Results.Ok(new { sessionId, items, deletedSessionIds });
+    return Results.Ok(new { sessionId, items, resumeSessionId, deletedSessionIds });
+});
+
+api.MapPost("/sessions/{sessionId}/resume", (string sessionId, HistoryRepository repo, ActiveSessionTracker tracker) =>
+{
+    var session = repo.GetSession(sessionId);
+    var deliveredToActive = tracker.RequestResumeSession(sessionId, session?.Repo);
+    return Results.Ok(new { sessionId, deliveredToActive });
 });
 
 api.MapGet("/sessions/{sessionId}/feedback/pending", (string sessionId, ActiveSessionTracker tracker) =>

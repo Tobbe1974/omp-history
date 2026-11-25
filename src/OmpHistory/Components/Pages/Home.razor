@@ -427,6 +427,49 @@
             </div>
         </div>
     }
+
+    @if (_sessionToResume is not null)
+    {
+        <div class="word-comment-backdrop" @onclick="CancelResumeSession">
+            <div class="word-comment-card session-resume-card"
+                 style="top: @(_sessionResumeTopPx)px; left: @(_sessionResumeLeftPx)px; right: auto;"
+                 role="dialog"
+                 aria-label="Resume Session"
+                 @onclick:stopPropagation="true"
+                 @oncontextmenu:stopPropagation="true">
+                <div class="word-comment-accent"></div>
+                <div class="word-comment-content">
+                    <div class="word-comment-header">
+                        <div class="word-comment-author">
+                            <span class="word-comment-avatar">R</span>
+                            <div class="word-comment-author-meta">
+                                <span class="word-comment-author-name">Resume: @_sessionToResume.Name ?</span>
+                                <span class="word-comment-timestamp"><code>@_sessionToResume.SessionId</code></span>
+                            </div>
+                        </div>
+                        <button type="button"
+                                class="word-comment-close"
+                                title="Cancel"
+                                aria-label="Close resume prompt"
+                                @onclick="CancelResumeSession">×</button>
+                    </div>
+
+                    <div class="word-comment-footer">
+                        <button type="button"
+                                class="word-comment-btn word-comment-btn-cancel"
+                                @onclick="CancelResumeSession">
+                            Cancel
+                        </button>
+                        <button type="button"
+                                class="word-comment-btn word-comment-btn-post"
+                                @onclick="ConfirmResumeSession">
+                            <span>Resume</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
 </div>
 
 @code {
@@ -462,6 +505,9 @@
     private SessionRecord? _sessionToDelete;
     private bool _askBeforeDeleteSession = true;
     private bool _askBeforeDeleteSuggestion = true;
+    private SessionRecord? _sessionToResume;
+    private int _sessionResumeTopPx = 140;
+    private int _sessionResumeLeftPx = 24;
     private bool _isPanesPinned = true;
     private bool _isFeedbackOpen;
     private int _feedbackOpenNonce;
@@ -1484,6 +1530,35 @@
             _selectedConversationId = null;
         }
         Repository.DeleteSession(sessionId);
+    }
+
+    private void HandleSessionContextMenu(MouseEventArgs e, SessionRecord session)
+    {
+        _sessionToResume = session;
+        _sessionResumeTopPx = (int)Math.Clamp(e.ClientY - 16, 60, 620);
+        _sessionResumeLeftPx = (int)Math.Clamp(e.ClientX + 8, 16, 420);
+    }
+
+    private void CancelResumeSession()
+    {
+        _sessionToResume = null;
+    }
+
+    private void ConfirmResumeSession()
+    {
+        if (_sessionToResume is null)
+        {
+            return;
+        }
+
+        var target = _sessionToResume;
+        _sessionToResume = null;
+
+        SelectSession(target.SessionId);
+        var delivered = SessionTracker.RequestResumeSession(target.SessionId, target.Repo);
+        _feedbackStatusMessage = delivered
+            ? $"Resuming \"{target.Name}\" in active OMP session…"
+            : $"Queued resume for \"{target.Name}\" (will switch on next OMP heartbeat)";
     }
 
     private string GetCachedConversationHtml(ConversationRecord conv)

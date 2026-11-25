@@ -2247,3 +2247,8 @@ html, body {
     background-color: rgba(88, 166, 255, 0.16);
     color: #79c0ff;
 }
+
+.session-resume-card {
+    width: 340px;
+    max-width: calc(100vw - 32px);
+}

@@ -9,7 +9,10 @@ public sealed class ActiveSessionTracker
     private static readonly TimeSpan ProcCacheDuration = TimeSpan.FromSeconds(2);
 
     private readonly ConcurrentDictionary<string, DateTimeOffset> _heartbeats = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _sessionRepos = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ConcurrentQueue<FeedbackItem>> _pendingFeedback = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _pendingResumeBySession = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _pendingResumeByRepo = new(StringComparer.OrdinalIgnoreCase);
     private readonly HistoryNotifier _notifier;
     private readonly object _procCacheLock = new();
     private DateTimeOffset _lastProcScan = DateTimeOffset.MinValue;
@@ -44,7 +47,7 @@ public sealed class ActiveSessionTracker
         }
     }
 
-    public void RecordHeartbeat(string sessionId)
+    public void RecordHeartbeat(string sessionId, string? repo = null)
     {
         if (string.IsNullOrWhiteSpace(sessionId))
         {
@@ -55,6 +58,10 @@ public sealed class ActiveSessionTracker
         var now = DateTimeOffset.UtcNow;
         var wasActive = IsSessionActive(id, now);
         _heartbeats[id] = now;
+        if (!string.IsNullOrWhiteSpace(repo))
+        {
+            _sessionRepos[id] = repo.Trim();
+        }
 
         if (!wasActive)
         {
@@ -353,6 +360,87 @@ public sealed class ActiveSessionTracker
         }
 
         return list;
+    }
+
+    public bool RequestResumeSession(string targetSessionId, string? repo = null)
+    {
+        if (string.IsNullOrWhiteSpace(targetSessionId))
+        {
+            return false;
+        }
+
+        var target = targetSessionId.Trim();
+        var now = DateTimeOffset.UtcNow;
+        string? chosenActiveId = null;
+
+        if (!string.IsNullOrWhiteSpace(repo))
+        {
+            var trimmedRepo = repo.Trim();
+            foreach (var kvp in _heartbeats.OrderByDescending(x => x.Value))
+            {
+                if ((now - kvp.Value) <= ActiveTimeout
+                    && _sessionRepos.TryGetValue(kvp.Key, out var activeRepo)
+                    && string.Equals(activeRepo, trimmedRepo, StringComparison.OrdinalIgnoreCase))
+                {
+                    chosenActiveId = kvp.Key;
+                    break;
+                }
+            }
+        }
+
+        if (chosenActiveId is null)
+        {
+            var latest = _heartbeats
+                .Where(kvp => (now - kvp.Value) <= ActiveTimeout)
+                .OrderByDescending(kvp => kvp.Value)
+                .FirstOrDefault();
+            if (!string.IsNullOrEmpty(latest.Key))
+            {
+                chosenActiveId = latest.Key;
+            }
+        }
+
+        if (chosenActiveId is not null)
+        {
+            _pendingResumeBySession[chosenActiveId] = target;
+            _notifier.NotifyChanged();
+            return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(repo))
+        {
+            _pendingResumeByRepo[repo.Trim()] = target;
+        }
+        _pendingResumeByRepo["*"] = target;
+        _notifier.NotifyChanged();
+        return false;
+    }
+
+    public string? DequeuePendingResume(string sessionId, string? repo = null)
+    {
+        if (string.IsNullOrWhiteSpace(sessionId))
+        {
+            return null;
+        }
+
+        var id = sessionId.Trim();
+        if (_pendingResumeBySession.TryRemove(id, out var target))
+        {
+            return target;
+        }
+
+        if (!string.IsNullOrWhiteSpace(repo) && _pendingResumeByRepo.TryRemove(repo.Trim(), out var repoTarget))
+        {
+            _pendingResumeByRepo.TryRemove("*", out _);
+            return repoTarget;
+        }
+
+        if (_pendingResumeByRepo.TryRemove("*", out var wildcardTarget))
+        {
+            return wildcardTarget;
+        }
+
+        return null;
     }
 
     public static string BuildFormattedMessage(string comment, string? quotedText, string? locationContext = null)

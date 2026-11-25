@@ -980,10 +980,18 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
 
       const data = (await res.json()) as {
         items?: Array<{ id?: string; formattedMessage?: string; comment?: string }>;
+        resumeSessionId?: string;
         deletedSessionIds?: string[];
       };
       if (Array.isArray(data?.deletedSessionIds) && data.deletedSessionIds.length > 0) {
         purgeDeletedLocalSessionFiles(data.deletedSessionIds, sessionId);
+      }
+      if (typeof data?.resumeSessionId === "string" && data.resumeSessionId.trim().length > 0) {
+        const targetResumeId = data.resumeSessionId.trim();
+        if (targetResumeId !== sessionId) {
+          await handleResumeFromHistory(targetResumeId, ctx);
+          return;
+        }
       }
       if (!Array.isArray(data?.items) || data.items.length === 0) return;
       for (const item of data.items) {

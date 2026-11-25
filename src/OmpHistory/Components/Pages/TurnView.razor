@@ -1,11 +1,8 @@
 @page "/turn/{ConversationId:long}"
 @rendermode InteractiveServer
-@using Markdig
-@using System.Text.RegularExpressions
 @inject HistoryRepository Repository
 @inject ActiveSessionTracker SessionTracker
 @inject IJSRuntime JS
-
 <PageTitle>
     @(_details is null
         ? "OMP Turn View"
@@ -128,14 +125,6 @@
     [Parameter]
     public long ConversationId { get; set; }
 
-    private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
-        .UseAdvancedExtensions()
-        .Build();
-
-    private static readonly Regex EmbeddedMarkdownBlockRegex = new(
-        @"<pre><code class=""language-(?:markdown|md)"">([\s\S]*?)</code></pre>",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
-
     private TurnDetailsRecord? _details;
     private string _replyText = string.Empty;
     private string? _statusMessage;
@@ -190,85 +179,5 @@
         _statusMessage = isActive
             ? "Reply sent to active OMP session."
             : "Reply queued (will deliver when session is active).";
-    }
-
-    private static string RenderMarkdown(string? markdown)
-    {
-        if (string.IsNullOrWhiteSpace(markdown))
-        {
-            return "<em>(Empty response)</em>";
-        }
-        return RenderMarkdownPass(markdown, depth: 0);
-    }
-
-    private static string RenderMarkdownPass(string markdown, int depth)
-    {
-        var html = Markdown.ToHtml(markdown, Pipeline);
-        if (depth >= 2)
-        {
-            return html;
-        }
-
-        return EmbeddedMarkdownBlockRegex.Replace(html, match =>
-        {
-            var innerMarkdown = System.Net.WebUtility.HtmlDecode(match.Groups[1].Value);
-            var innerHtml = RenderMarkdownPass(innerMarkdown, depth + 1);
-            return $"<div class=\"embedded-markdown\">{innerHtml}</div>";
-        });
-    }
-
-    private static string FormatFullDateTime(string iso)
-    {
-        if (DateTimeOffset.TryParse(iso, out var dto))
-        {
-            return dto.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-        }
-        return iso;
-    }
-
-    private static string FormatCredits(double? credits)
-    {
-        if (!credits.HasValue)
-        {
-            return "N/A";
-        }
-        return credits.Value.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
-    }
-
-    private static string FormatTokens(long tokens)
-    {
-        if (tokens >= 1_000_000)
-        {
-            return $"{(tokens / 1_000_000.0).ToString("0.1", System.Globalization.CultureInfo.InvariantCulture)}M";
-        }
-        if (tokens >= 1_000)
-        {
-            return $"{(tokens / 1_000.0).ToString("0.1", System.Globalization.CultureInfo.InvariantCulture)}k";
-        }
-        return tokens.ToString(System.Globalization.CultureInfo.InvariantCulture);
-    }
-
-    private static string FormatUsageTooltip(double? credits, double? costUsd, long? totalTokens, string? model = null)
-    {
-        if (!credits.HasValue && !costUsd.HasValue && !totalTokens.HasValue)
-        {
-            return "Usage data: N/A";
-        }
-
-        var parts = new List<string>(4);
-        if (!string.IsNullOrWhiteSpace(model))
-        {
-            parts.Add($"Model: {model}");
-        }
-        parts.Add($"Credits: {(credits.HasValue ? credits.Value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) : "N/A")}");
-        if (costUsd.HasValue)
-        {
-            parts.Add($"Est. Cost: ${costUsd.Value.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture)}");
-        }
-        if (totalTokens.HasValue)
-        {
-            parts.Add($"Tokens: {totalTokens.Value:N0}");
-        }
-        return string.Join(" • ", parts);
     }
 }

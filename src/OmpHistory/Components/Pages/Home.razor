@@ -1,8 +1,6 @@
 @page "/"
 @rendermode InteractiveServer
 @implements IDisposable
-@using Markdig
-@using System.Text.RegularExpressions
 @inject HistoryRepository Repository
 @inject HistoryNotifier Notifier
 @inject ActiveSessionTracker SessionTracker
@@ -12,755 +10,114 @@
 <PageTitle>OMP History</PageTitle>
 
 <div class="history-app">
-    <header class="history-header">
-        <div class="brand">
-            <span class="brand-dot"></span>
-            <span class="brand-title">OMP History</span>
-        </div>
-
-        <div class="repo-selector">
-            <span class="repo-label">REPO</span>
-            @if (_repos.Count == 0)
-            {
-                <span class="repo-empty">No repositories recorded yet</span>
-            }
-            else
-            {
-                <div class="repo-pills" role="tablist" aria-label="Repositories">
-                    @foreach (var repo in _repos)
-                    {
-                        var isSelected = string.Equals(repo.Repo, _selectedRepo, StringComparison.Ordinal);
-                        <button type="button"
-                                class="repo-pill @(isSelected ? "active" : "")"
-                                @onclick="() => SelectRepo(repo.Repo)">
-                            <span class="repo-name">@repo.Repo</span>
-                            <span class="repo-count">@repo.SessionCount</span>
-                        </button>
-                    }
-                </div>
-            }
-        </div>
-
-        <div class="header-actions">
-            @{
-                var quota = SessionTracker.LatestCopilotQuota;
-            }
-            @if (quota is not null && quota.Entitlement > 0)
-            {
-                var usedPct = Math.Clamp((quota.CreditsUsed / quota.Entitlement) * 100.0, 0.0, 100.0);
-                var meterClass = usedPct >= 85.0
-                    ? "meter-low"
-                    : (usedPct >= 65.0 ? "meter-warn" : "meter-ok");
-                <div class="copilot-meter @meterClass"
-                     title="@($"Copilot AI Credits ({quota.Plan ?? "account"}): {quota.CreditsUsed:N1} used / {quota.Entitlement:N0} total ({usedPct:0.0}% used • {quota.Remaining:N1} remaining){(string.IsNullOrWhiteSpace(quota.ResetDate) ? "" : $" • Resets {quota.ResetDate}")}")">
-                    <div class="copilot-meter-top">
-                        <span class="copilot-meter-label">COPILOT</span>
-                        <span class="copilot-meter-value">@($"{quota.CreditsUsed:N0} / {quota.Entitlement:N0}")</span>
-                        <span class="copilot-meter-pct">(@($"{usedPct:0.0}%"))</span>
-                    </div>
-                    <div class="copilot-meter-bar">
-                        <div class="copilot-meter-fill" style="width: @($"{usedPct.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}%");"></div>
-                    </div>
-                </div>
-            }
-            else
-            {
-                <div class="copilot-meter meter-na" title="Copilot AI credit quota will populate on next OMP session or turn">
-                    <div class="copilot-meter-top">
-                        <span class="copilot-meter-label">COPILOT</span>
-                        <span class="copilot-meter-value">N/A</span>
-                    </div>
-                </div>
-            }
-
-            <button type="button"
-                    class="pin-panes-btn git-compare-header-btn @(_isGitCompareOpen ? "active" : "")"
-                    title="@(_isGitCompareOpen ? "Close Git Compare and return to conversation" : "Open Git Compare for the selected repository")"
-                    aria-label="Toggle Git Compare"
-                    aria-pressed="@(_isGitCompareOpen ? "true" : "false")"
-                    disabled="@string.IsNullOrEmpty(_selectedRepo)"
-                    @onclick="ToggleGitCompare">
-                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <circle cx="4" cy="3.5" r="1.75" />
-                    <circle cx="4" cy="12.5" r="1.75" />
-                    <circle cx="12" cy="12.5" r="1.75" />
-                    <path d="M4 5.25v5.5M12 10.75V6.5a2.5 2.5 0 0 0-2.5-2.5H7" />
-                    <path d="M8.5 2L6.5 4l2 2" />
-                </svg>
-                <span>Git Compare</span>
-            </button>
-
-            <button type="button"
-                    class="pin-panes-btn @(_leftPaneTab == "suggestions" ? "active" : "")"
-                    title="View change suggestions for the selected repository"
-                    aria-label="Suggestions"
-                    disabled="@string.IsNullOrEmpty(_selectedRepo)"
-                    @onclick="OpenSuggestionsTab">
-                <span>Suggestions (@OpenSuggestionCount)</span>
-            </button>
-
-            <button type="button"
-                    class="pin-panes-btn @(_isPanesPinned ? "active" : "")"
-                    title="@(_isPanesPinned ? "Unpin to hide Sessions and Conversations" : "Pin to show Sessions and Conversations")"
-                    aria-label="Pin Sessions and Conversations panes"
-                    aria-pressed="@(_isPanesPinned ? "true" : "false")"
-                    @onclick="TogglePanesPinned">
-                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M9.5 2.5L13.5 6.5L12 8L9.5 7.5L6.5 10.5L7 13L5.5 14.5L3 12L1.5 14.5L3.5 12.5L1.5 10.5L3 9L5.5 9.5L8.5 6.5L8 4L9.5 2.5Z" />
-                </svg>
-                <span>Pin Lists</span>
-            </button>
-
-            <div class="header-status">
-                <span class="live-indicator"></span>
-                <span>Live</span>
-            </div>
-        </div>
-    </header>
+    <HeaderBar Repos="_repos"
+               SelectedRepo="@_selectedRepo"
+               CopilotQuota="SessionTracker.LatestCopilotQuota"
+               IsGitCompareOpen="_isGitCompareOpen"
+               LeftPaneTab="@_leftPaneTab"
+               OpenSuggestionCount="OpenSuggestionCount"
+               IsPanesPinned="_isPanesPinned"
+               OnSelectRepo="SelectRepo"
+               OnToggleGitCompare="ToggleGitCompare"
+               OnOpenSuggestionsTab="OpenSuggestionsTab"
+               OnTogglePanesPinned="TogglePanesPinned" />
 
     <div class="history-workspace @(_isPanesPinned ? "" : "panes-unpinned")">
         @if (_isPanesPinned)
         {
-        <aside class="pane sessions-pane" aria-label="Sessions">
-            <div class="pane-header pane-tabs-header">
-                <div class="pane-tabs" role="tablist" aria-label="Sessions and Suggestions">
-                    <button type="button"
-                            role="tab"
-                            aria-selected="@(_leftPaneTab == "sessions" ? "true" : "false")"
-                            class="pane-tab @(_leftPaneTab == "sessions" ? "active" : "")"
-                            @onclick='() => SetLeftPaneTab("sessions")'>
-                        SESSIONS @(string.IsNullOrEmpty(_selectedRepo) ? "" : $"({_sessions.Count})")
-                    </button>
-                    <button type="button"
-                            role="tab"
-                            aria-selected="@(_leftPaneTab == "suggestions" ? "true" : "false")"
-                            class="pane-tab @(_leftPaneTab == "suggestions" ? "active" : "")"
-                            @onclick='() => SetLeftPaneTab("suggestions")'>
-                        SUGGESTIONS @(string.IsNullOrEmpty(_selectedRepo) ? "" : $"({_suggestions.Count})")
-                    </button>
-                </div>
-            </div>
-            <div class="pane-body">
-                @if (_leftPaneTab == "suggestions")
-                {
-                    @if (string.IsNullOrEmpty(_selectedRepo))
-                    {
-                        <div class="empty-state">Select a repository to view suggestions.</div>
-                    }
-                    else if (_suggestions.Count == 0)
-                    {
-                        <div class="empty-state">No suggestions recorded for <strong>@_selectedRepo</strong> yet.</div>
-                    }
-                    else
-                    {
-                        @foreach (var sug in _suggestions)
-                        {
-                            var isSelected = _selectedSuggestionId == sug.Id;
-                            <div class="list-card session-card suggestion-card @(isSelected ? "selected" : "") @(sug.Status == "sent" ? "suggestion-sent" : "")"
-                                 @onclick="() => SelectSuggestion(sug.Id)"
-                                 @oncontextmenu="(e) => OpenSuggestionContextMenu(e, sug)"
-                                 @oncontextmenu:preventDefault="true">
-                                <div class="session-card-main">
-                                    <div class="session-title-row">
-                                        <div class="session-title" title="@sug.Title">@sug.Title</div>
-                                        @if (!string.IsNullOrWhiteSpace(sug.Severity))
-                                        {
-                                            <span class="suggestion-severity-badge severity-@sug.Severity">@sug.Severity.ToUpperInvariant()</span>
-                                        }
-                                        <span class="suggestion-status-badge status-@sug.Status">@sug.Status.ToUpperInvariant()</span>
-                                    </div>
-                                    @if (!string.IsNullOrWhiteSpace(sug.FilePaths))
-                                    {
-                                        <div class="session-id suggestion-files" title="@sug.FilePaths">@sug.FilePaths</div>
-                                    }
-                                    <div class="session-meta">
-                                        <span>#@sug.Id</span>
-                                        <span>•</span>
-                                        <span title="@sug.CreatedAt">@FormatFullDateTime(sug.CreatedAt)</span>
-                                    </div>
-                                </div>
-                                <button type="button"
-                                        class="delete-session-btn"
-                                        title="Remove suggestion"
-                                        aria-label="Remove suggestion @sug.Title"
-                                        @onclick:stopPropagation="true"
-                                        @onclick="() => RequestDeleteSuggestion(sug)">
-                                    ×
-                                </button>
-                            </div>
-                        }
-                    }
-                }
-                else if (string.IsNullOrEmpty(_selectedRepo))
-                {
-                    <div class="empty-state">Select or create a session from OMP to begin.</div>
-                }
-                else if (_sessions.Count == 0)
-                {
-                    <div class="empty-state">No sessions in <strong>@_selectedRepo</strong>.</div>
-                }
-                else
-                {
-                    @foreach (var session in _sessions)
-                    {
-                        var isSelected = string.Equals(session.SessionId, _selectedSessionId, StringComparison.Ordinal);
-                        var isActiveSession = SessionTracker.IsSessionActive(session.SessionId);
-                        <div class="list-card session-card @(isSelected ? "selected" : "") @(isActiveSession ? "active-omp-session" : "")"
-                             @onclick="() => SelectSession(session.SessionId)">
-                            <div class="session-card-main">
-                                <div class="session-title-row">
-                                    <div class="session-title" title="@session.Name">@session.Name</div>
-                                    @if (isActiveSession)
-                                    {
-                                        <span class="session-active-badge" title="Active in OMP terminal">
-                                            <span class="session-active-dot"></span>
-                                            ACTIVE
-                                        </span>
-                                    }
-                                </div>
-                                <div class="session-id" title="@session.SessionId">@session.SessionId</div>
-                                <div class="session-meta">
-                                    <span>@session.ConversationCount @(session.ConversationCount == 1 ? "turn" : "turns")</span>
-                                    <span>•</span>
-                                    <span class="usage-meta-pill @(session.TotalCredits.HasValue ? "" : "usage-na")"
-                                          title="@FormatUsageTooltip(session.TotalCredits, session.TotalCostUsd, session.TotalTokens)">
-                                        Cr: @FormatCredits(session.TotalCredits)
-                                    </span>
-                                    <span>•</span>
-                                    <span title="@session.UpdatedAt">@FormatFullDateTime(session.UpdatedAt)</span>
-                                </div>
-                            </div>
-                            <button type="button"
-                                    class="delete-session-btn"
-                                    title="Delete session"
-                                    aria-label="Delete session @session.Name"
-                                    @onclick:stopPropagation="true"
-                                    @onclick="() => RequestDeleteSession(session)">
-                                ×
-                            </button>
-                        </div>
-                    }
-                }
-            </div>
-            <div class="sessions-footer">
-                @if (_isSettingsOpen)
-                {
-                    <div class="settings-popover" role="dialog" aria-label="Settings">
-                        <div class="settings-popover-header">
-                            <span>Global Settings</span>
-                            <button type="button"
-                                    class="settings-popover-close"
-                                    aria-label="Close settings"
-                                    @onclick="ToggleSettings">×</button>
-                        </div>
-                        <label class="settings-checkbox-row">
-                            <input type="checkbox"
-                                   checked="@_autoSelectNewConversation"
-                                   @onchange="OnAutoSelectChanged" />
-                            <span>Auto-select new conversations</span>
-                        </label>
-                        <label class="settings-checkbox-row">
-                            <input type="checkbox"
-                                   checked="@_askBeforeDeleteSession"
-                                   @onchange="OnAskBeforeDeleteSessionChanged" />
-                            <span>Ask before delete (Sessions)</span>
-                        </label>
-                        <label class="settings-checkbox-row">
-                            <input type="checkbox"
-                                   checked="@_askBeforeDeleteSuggestion"
-                                   @onchange="OnAskBeforeDeleteSuggestionChanged" />
-                            <span>Ask before delete (Suggestions)</span>
-                        </label>
-                        <label class="settings-checkbox-row">
-                            <input type="checkbox"
-                                   checked="@_ntfyEnabled"
-                                   @onchange="OnNtfyEnabledChanged" />
-                            <span>Send replies to ntfy</span>
-                        </label>
-                        <div class="settings-ntfy-fields">
-                            <div class="settings-field-group">
-                                <label class="settings-field-label" for="ntfy-server-input">ntfy Server URL</label>
-                                <input id="ntfy-server-input"
-                                       type="text"
-                                       class="settings-text-input"
-                                       placeholder="https://skegriebyavag13.duckdns.org"
-                                       value="@_ntfyServerUrl"
-                                       @onchange="OnNtfyServerUrlChanged" />
-                            </div>
-                            <div class="settings-field-group">
-                                <label class="settings-field-label" for="ntfy-topic-input">ntfy Topic</label>
-                                <input id="ntfy-topic-input"
-                                       type="text"
-                                       class="settings-text-input"
-                                       placeholder="omp-history"
-                                       value="@_ntfyTopic"
-                                       @onchange="OnNtfyTopicChanged" />
-                            </div>
-                            @if (!string.IsNullOrWhiteSpace(_ntfyStatusMessage))
-                            {
-                                <span class="settings-ntfy-status">@_ntfyStatusMessage</span>
-                            }
-                        </div>
-                    </div>
-                }
-                <button type="button"
-                        class="settings-cog-btn @(_isSettingsOpen ? "active" : "")"
-                        title="Settings"
-                        aria-label="Settings"
-                        @onclick="ToggleSettings">
-                    <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                        <circle cx="10" cy="10" r="2.6" />
-                        <path d="M16.2 12.3a1.3 1.3 0 0 0 .26 1.43l.05.05a1.55 1.55 0 1 1-2.2 2.2l-.05-.05a1.3 1.3 0 0 0-1.43-.26 1.3 1.3 0 0 0-.78 1.19v.14a1.55 1.55 0 1 1-3.1 0v-.07a1.3 1.3 0 0 0-.84-1.19 1.3 1.3 0 0 0-1.43.26l-.05.05a1.55 1.55 0 1 1-2.2-2.2l.05-.05a1.3 1.3 0 0 0 .26-1.43 1.3 1.3 0 0 0-1.19-.78h-.14a1.55 1.55 0 1 1 0-3.1h.07a1.3 1.3 0 0 0 1.19-.84 1.3 1.3 0 0 0-.26-1.43l-.05-.05a1.55 1.55 0 1 1 2.2-2.2l.05.05a1.3 1.3 0 0 0 1.43.26h.06a1.3 1.3 0 0 0 .78-1.19v-.14a1.55 1.55 0 1 1 3.1 0v.07a1.3 1.3 0 0 0 .78 1.19 1.3 1.3 0 0 0 1.43-.26l.05-.05a1.55 1.55 0 1 1 2.2 2.2l-.05.05a1.3 1.3 0 0 0-.26 1.43v.06a1.3 1.3 0 0 0 1.19.78h.14a1.55 1.55 0 1 1 0 3.1h-.07a1.3 1.3 0 0 0-1.19.78z" />
-                    </svg>
-                    <span class="settings-cog-label">Settings</span>
-                </button>
-            </div>
-        </aside>
+            <SessionPane SelectedRepo="@_selectedRepo"
+                         LeftPaneTab="@_leftPaneTab"
+                         Sessions="_sessions"
+                         SelectedSessionId="@_selectedSessionId"
+                         Suggestions="_suggestions"
+                         SelectedSuggestionId="_selectedSuggestionId"
+                         IsSettingsOpen="_isSettingsOpen"
+                         AutoSelectNewConversation="_autoSelectNewConversation"
+                         AskBeforeDeleteSession="_askBeforeDeleteSession"
+                         AskBeforeDeleteSuggestion="_askBeforeDeleteSuggestion"
+                         NtfyEnabled="_ntfyEnabled"
+                         NtfyServerUrl="@_ntfyServerUrl"
+                         NtfyTopic="@_ntfyTopic"
+                         NtfyStatusMessage="@_ntfyStatusMessage"
+                         OnSetLeftPaneTab="SetLeftPaneTab"
+                         OnSelectSession="SelectSession"
+                         OnSessionContextMenu="(x) => HandleSessionContextMenu(x.Args, x.Session)"
+                         OnRequestDeleteSession="RequestDeleteSession"
+                         OnSelectSuggestion="SelectSuggestion"
+                         OnOpenSuggestionContextMenu="(x) => OpenSuggestionContextMenu(x.Args, x.Suggestion)"
+                         OnRequestDeleteSuggestion="RequestDeleteSuggestion"
+                         OnToggleSettings="ToggleSettings"
+                         OnAutoSelectChanged="OnAutoSelectChanged"
+                         OnAskBeforeDeleteSessionChanged="OnAskBeforeDeleteSessionChanged"
+                         OnAskBeforeDeleteSuggestionChanged="OnAskBeforeDeleteSuggestionChanged"
+                         OnNtfyEnabledChanged="OnNtfyEnabledChanged"
+                         OnNtfyServerUrlChanged="OnNtfyServerUrlChanged"
+                         OnNtfyTopicChanged="OnNtfyTopicChanged" />
 
-        <!-- Pane 2: Conversations in selected session -->
-        <section class="pane conversations-pane" aria-label="Conversations">
-            <div class="pane-header">
-                <span>
-                    CONVERSATIONS
-                    @if (_conversations.Count > 0)
-                    {
-                        if (HasActiveFilter)
-                        {
-                            <span>(@FilteredConversations.Count / @_conversations.Count)</span>
-                        }
-                        else
-                        {
-                            <span>(@_conversations.Count)</span>
-                        }
-                    }
-                </span>
-
-                <div class="pane-header-actions">
-                    @if (HasActiveFilter)
-                    {
-                        <span class="active-filter-chip" title="Filtered by: @_appliedFilter">@_appliedFilter</span>
-                        <button type="button"
-                                class="funnel-btn clear-funnel-btn"
-                                title="Remove filter"
-                                aria-label="Remove conversation filter"
-                                @onclick="ClearFilter">
-                            <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                                <path d="M2.5 3.5h13l-5 6v5l-3 1.5v-6.5l-5-6z" />
-                                <path d="M14.5 12.5l4 4m0-4l-4 4" stroke-width="2" />
-                            </svg>
-                        </button>
-                    }
-                    <button type="button"
-                            class="funnel-btn @(HasActiveFilter || _isFilterModalOpen ? "active" : "")"
-                            title="Filter conversations"
-                            aria-label="Filter conversations"
-                            @onclick="OpenFilterModal">
-                        <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M2.5 3.5h15l-6 6.5v5.5l-3 1.5v-7l-6-6.5z" />
-                        </svg>
-                    </button>
-                </div>
-            </div>
-
-            <div class="pane-body">
-                @if (string.IsNullOrEmpty(_selectedSessionId))
-                {
-                    <div class="empty-state">Select a session to view its conversations.</div>
-                }
-                else if (_conversations.Count == 0)
-                {
-                    <div class="empty-state">No conversations recorded for this session yet.</div>
-                }
-                else if (FilteredConversations.Count == 0)
-                {
-                    <div class="empty-state">
-                        No conversations match <strong>"@_appliedFilter"</strong>.
-                    </div>
-                }
-                else
-                {
-                    @foreach (var item in FilteredConversations)
-                    {
-                        var conv = item.Record;
-                        var isSelected = conv.Id == _selectedConversationId;
-                        var hasTurnDiff = !string.IsNullOrWhiteSpace(conv.DiffPatch);
-                        var hasTreeSnapshot = !string.IsNullOrWhiteSpace(conv.GitTreeBefore) || !string.IsNullOrWhiteSpace(conv.GitTreeAfter);
-                        <div class="list-card conversation-card @(isSelected ? "selected" : "")"
-                             @onclick="() => SelectConversation(conv.Id)">
-                            <div class="conversation-header">
-                                <div class="conversation-header-left">
-                                    <span class="turn-badge">#@item.TurnNumber</span>
-                                    @if (hasTurnDiff)
-                                    {
-                                        var parsedSummary = GitCompareService.ParseUnifiedDiff(conv.DiffPatch);
-                                        <span class="turn-diff-badge" title="@parsedSummary.ChangedFiles.Count file(s) changed (+@parsedSummary.TotalAdditions / -@parsedSummary.TotalDeletions)">
-                                            <span class="git-stat-add">+@parsedSummary.TotalAdditions</span>
-                                            <span class="git-stat-del">-@parsedSummary.TotalDeletions</span>
-                                        </span>
-                                    }
-                                    else if (hasTreeSnapshot)
-                                    {
-                                        <span class="turn-snapshot-dot" title="Git snapshot recorded for this turn"></span>
-                                    }
-                                    @if (conv.SuggestionCount > 0)
-                                    {
-                                        <span class="turn-suggestion-badge"
-                                              title="@($"{conv.SuggestionCount} change {(conv.SuggestionCount == 1 ? "suggestion" : "suggestions")} noted during this turn")">
-                                            💡 @conv.SuggestionCount
-                                        </span>
-                                    }
-                                    <span class="turn-credits-badge @(conv.CreditsUsed.HasValue ? "" : "usage-na")"
-                                          title="@FormatUsageTooltip(conv.CreditsUsed, conv.CostUsd, conv.TotalTokens, conv.Model)">
-                                        Cr: @FormatCredits(conv.CreditsUsed)
-                                    </span>
-                                </div>
-                                <span class="turn-time">@FormatTimestamp(conv.CreatedAt)</span>
-                            </div>
-                            <div class="conversation-preview">@TruncatePreview(conv.Prompt, 110)</div>
-                        </div>
-                    }
-                }
-            </div>
-        </section>
+            <TurnListPane SelectedSessionId="@_selectedSessionId"
+                          TotalConversationsCount="_conversations.Count"
+                          FilteredConversations="FilteredConversations"
+                          SelectedConversationId="_selectedConversationId"
+                          HasActiveFilter="HasActiveFilter"
+                          AppliedFilter="@_appliedFilter"
+                          IsFilterModalOpen="_isFilterModalOpen"
+                          OnSelectConversation="SelectConversation"
+                          OnClearFilter="ClearFilter"
+                          OnOpenFilterModal="OpenFilterModal" />
         }
 
         <!-- Pane 3: Conversation detail (Question/Task + Markdown Response) -->
         <main class="pane detail-pane" aria-label="Conversation Details">
-            @if (_feedbackDrafts.Count > 0 && !_isFeedbackOpen)
-            {
-                <div class="feedback-batch-bar">
-                    <div class="feedback-batch-bar-main">
-                        <div class="feedback-batch-summary" @onclick="ToggleFeedbackBatchExpanded" title="Click to review or edit queued comments">
-                            <span class="feedback-batch-badge">@_feedbackDrafts.Count</span>
-                            <span class="feedback-batch-label">
-                                @(_feedbackDrafts.Count == 1 ? "1 staged comment" : $"{_feedbackDrafts.Count} staged comments") ready to send
-                            </span>
-                            <span class="feedback-batch-chevron">@(_isFeedbackBatchExpanded ? "▾" : "▸")</span>
-                        </div>
-                        <div class="feedback-batch-actions">
-                            <button type="button"
-                                    class="word-comment-btn word-comment-btn-cancel"
-                                    title="Discard all staged comments"
-                                    @onclick="ClearFeedbackBatch">
-                                Clear All
-                            </button>
-                            <button type="button"
-                                    class="word-comment-btn word-comment-btn-post"
-                                    title="Send all staged comments to OMP in a single prompt"
-                                    @onclick="SubmitFeedbackBatchOnly">
-                                <span>Send All (@_feedbackDrafts.Count)</span>
-                                <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
-                                    <path d="M1.5 1.5L14.5 8L1.5 14.5L3.5 8L1.5 1.5ZM4.8 8.7L3.2 12.6L12.1 8L3.2 3.4L4.8 7.3H9.5V8.7H4.8Z" />
-                                </svg>
-                            </button>
-                        </div>
-                    </div>
-
-                    @if (_isFeedbackBatchExpanded)
-                    {
-                        <div class="feedback-batch-list">
-                            @for (var i = 0; i < _feedbackDrafts.Count; i++)
-                            {
-                                var idx = i;
-                                var draft = _feedbackDrafts[i];
-                                <div class="feedback-batch-item">
-                                    <div class="feedback-batch-item-header">
-                                        <span class="feedback-batch-item-num">#@(idx + 1)</span>
-                                        @if (draft.TurnNumber is > 0)
-                                        {
-                                            <span class="feedback-location-pill">Turn #@draft.TurnNumber</span>
-                                        }
-                                        @if (!string.IsNullOrWhiteSpace(draft.LocationContext))
-                                        {
-                                            <span class="feedback-location-pill">@draft.LocationContext</span>
-                                        }
-                                        <button type="button"
-                                                class="feedback-batch-item-remove"
-                                                title="Remove this comment"
-                                                @onclick="() => RemoveFeedbackDraft(draft.Id)">×</button>
-                                    </div>
-                                    @if (!string.IsNullOrWhiteSpace(draft.QuotedText))
-                                    {
-                                        <div class="feedback-batch-item-quote">“@TruncatePreview(draft.QuotedText, 120)”</div>
-                                    }
-                                    <div class="feedback-batch-item-comment">@draft.Comment</div>
-                                </div>
-                            }
-                        </div>
-                    }
-                </div>
-            }
+            <FeedbackOverlay FeedbackDrafts="_feedbackDrafts"
+                             IsFeedbackOpen="_isFeedbackOpen"
+                             CanShowFeedbackModal="@(_isGitCompareOpen || SelectedConversation is not null)"
+                             IsFeedbackBatchExpanded="_isFeedbackBatchExpanded"
+                             FeedbackTopPx="_feedbackTopPx"
+                             FeedbackOpenNonce="_feedbackOpenNonce"
+                             FeedbackPreventKeyDefault="_feedbackPreventKeyDefault"
+                             FeedbackComment="@_feedbackComment"
+                             FeedbackQuotedText="@_feedbackQuotedText"
+                             FeedbackLocationContext="@_feedbackLocationContext"
+                             SelectedTurnNumber="SelectedTurnNumber"
+                             IsGitCompareOpen="_isGitCompareOpen"
+                             IsSelectedSessionActive="IsSelectedSessionActive"
+                             ActiveSessionInRepo="ActiveSessionInRepo"
+                             SendFeedbackButtonLabel="@SendFeedbackButtonLabel"
+                             OnToggleFeedbackBatchExpanded="ToggleFeedbackBatchExpanded"
+                             OnClearFeedbackBatch="ClearFeedbackBatch"
+                             OnSubmitFeedbackBatchOnly="SubmitFeedbackBatchOnly"
+                             OnRemoveFeedbackDraft="RemoveFeedbackDraft"
+                             OnCloseFeedbackCard="CloseFeedbackCard"
+                             OnClearFeedbackQuote="ClearFeedbackQuote"
+                             OnFeedbackCommentInput="(val) => _feedbackComment = val"
+                             OnFeedbackKeyDown="HandleFeedbackKeyDown"
+                             OnAddFeedbackToBatch="AddFeedbackToBatch"
+                             OnSubmitFeedback="SubmitFeedback" />
             @if (_isGitCompareOpen)
             {
-                <div class="detail-scroll git-compare-scroll"
-                     @oncontextmenu="HandleDetailContextMenuAsync"
-                     @oncontextmenu:preventDefault="true">
-                    <section class="git-compare-toolbar-card" @oncontextmenu:stopPropagation="true">
-                        <div class="git-compare-top-row">
-                            <div class="git-compare-title-group">
-                                <span class="git-compare-badge">GIT COMPARE</span>
-                                <span class="git-compare-repo-name">@_selectedRepo</span>
-                                @if (_gitOverview?.IsAvailable == true)
-                                {
-                                    <span class="git-branch-chip" title="Current branch">
-                                        ⎇ @_gitOverview.CurrentBranch
-                                    </span>
-                                    @if (!string.IsNullOrEmpty(_gitOverview.RepoPath))
-                                    {
-                                        <span class="git-repo-path" title="@_gitOverview.RepoPath">@_gitOverview.RepoPath</span>
-                                    }
-                                }
-                            </div>
-
-                            <div class="git-compare-top-actions">
-                                @if (!string.IsNullOrEmpty(_feedbackStatusMessage))
-                                {
-                                    <span class="feedback-status-pill">@_feedbackStatusMessage</span>
-                                }
-                                <div class="git-format-toggle" role="group" aria-label="Diff layout">
-                                    <button type="button"
-                                            class="git-format-btn @(_gitOutputFormat == "line-by-line" ? "active" : "")"
-                                            @onclick='() => SetGitOutputFormat("line-by-line")'>
-                                        Unified
-                                    </button>
-                                    <button type="button"
-                                            class="git-format-btn @(_gitOutputFormat == "side-by-side" ? "active" : "")"
-                                            @onclick='() => SetGitOutputFormat("side-by-side")'>
-                                        Side-by-Side
-                                    </button>
-                                </div>
-                                <button type="button"
-                                        class="git-action-btn"
-                                        title="Refresh git status & diff"
-                                        @onclick="RefreshGitCompare">
-                                    ↻ Refresh
-                                </button>
-                                <button type="button"
-                                        class="git-action-btn git-close-btn"
-                                        title="Close Git Compare"
-                                        @onclick="CloseGitCompare">
-                                    ✕ Close
-                                </button>
-                            </div>
-                        </div>
-
-                        <div class="git-compare-controls-row">
-                            <div class="git-mode-tabs" role="tablist" aria-label="What to compare">
-                                <button type="button"
-                                        class="git-mode-tab @(_gitCompareMode == "working" ? "active" : "")"
-                                        @onclick='() => SelectGitMode("working")'>
-                                    <span>Working Tree</span>
-                                    @if (_gitOverview is not null && _gitOverview.UncommittedFileCount > 0)
-                                    {
-                                        <span class="git-mode-count">@_gitOverview.UncommittedFileCount</span>
-                                    }
-                                </button>
-                                <button type="button"
-                                        class="git-mode-tab @(_gitCompareMode == "latest" ? "active" : "")"
-                                        @onclick='() => SelectGitMode("latest")'>
-                                    <span>Commit Changes</span>
-                                </button>
-                                <button type="button"
-                                        class="git-mode-tab @(_gitCompareMode == "compare" ? "active" : "")"
-                                        @onclick='() => SelectGitMode("compare")'>
-                                    <span>Compare Refs / Commits</span>
-                                </button>
-                                <button type="button"
-                                        class="git-mode-tab @(_gitCompareMode == "turns" ? "active" : "")"
-                                        @onclick='() => SelectGitMode("turns")'>
-                                    <span>Compare Messages</span>
-                                    @if (ConversationsWithSnapshots.Count > 0)
-                                    {
-                                        <span class="git-mode-count">@ConversationsWithSnapshots.Count</span>
-                                    }
-                                </button>
-                            </div>
-
-                            @if (_gitCompareMode == "latest" && _gitOverview?.IsAvailable == true)
-                            {
-                                <div class="git-ref-selectors">
-                                    <label class="git-ref-label">
-                                        <span>Commit</span>
-                                        <select class="git-ref-select" value="@_gitTargetRef" @onchange="OnGitSingleCommitChanged">
-                                            @foreach (var c in _gitOverview.RecentCommits)
-                                            {
-                                                <option value="@c.ShortHash">@c.ShortHash — @TruncatePreview(c.Subject, 55) (@c.RelativeDate)</option>
-                                            }
-                                        </select>
-                                    </label>
-                                </div>
-                            }
-                            else if (_gitCompareMode == "compare" && _gitOverview?.IsAvailable == true)
-                            {
-                                <div class="git-ref-selectors">
-                                    <label class="git-ref-label">
-                                        <span>Base (From)</span>
-                                        <select class="git-ref-select" value="@_gitBaseRef" @onchange="OnGitBaseRefChanged">
-                                            <optgroup label="Branches">
-                                                @foreach (var b in _gitOverview.Branches)
-                                                {
-                                                    <option value="@b">⎇ @b</option>
-                                                }
-                                            </optgroup>
-                                            <optgroup label="Recent Commits">
-                                                @foreach (var c in _gitOverview.RecentCommits)
-                                                {
-                                                    <option value="@c.ShortHash">@c.ShortHash — @TruncatePreview(c.Subject, 45) (@c.RelativeDate)</option>
-                                                }
-                                            </optgroup>
-                                        </select>
-                                    </label>
-                                    <span class="git-ref-arrow">→</span>
-                                    <label class="git-ref-label">
-                                        <span>Target (To)</span>
-                                        <select class="git-ref-select" value="@_gitTargetRef" @onchange="OnGitTargetRefChanged">
-                                            <option value="WORKING">Working Tree (Uncommitted + Committed)</option>
-                                            <option value="HEAD">HEAD (@(_gitOverview.HeadCommit ?? "latest"))</option>
-                                            <optgroup label="Branches">
-                                                @foreach (var b in _gitOverview.Branches)
-                                                {
-                                                    <option value="@b">⎇ @b</option>
-                                                }
-                                            </optgroup>
-                                            <optgroup label="Recent Commits">
-                                                @foreach (var c in _gitOverview.RecentCommits)
-                                                {
-                                                    <option value="@c.ShortHash">@c.ShortHash — @TruncatePreview(c.Subject, 45) (@c.RelativeDate)</option>
-                                                }
-                                            </optgroup>
-                                        </select>
-                                    </label>
-                                </div>
-                            }
-                            else if (_gitCompareMode == "turns")
-                            {
-                                @if (ConversationsWithSnapshots.Count == 0)
-                                {
-                                    <div class="git-ref-selectors">
-                                        <span class="git-ref-label">No message git snapshots recorded in this session yet.</span>
-                                    </div>
-                                }
-                                else
-                                {
-                                    <div class="git-ref-selectors">
-                                        <label class="git-ref-label">
-                                            <span>From</span>
-                                            <select class="git-ref-select" value="@_gitBaseRef" @onchange="OnGitBaseRefChanged">
-                                                @foreach (var item in ConversationsWithSnapshots)
-                                                    {
-                                                        if (!string.IsNullOrWhiteSpace(item.Record.GitTreeBefore))
-                                                        {
-                                                            <option value="@item.Record.GitTreeBefore">Before #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
-                                                        }
-                                                        if (!string.IsNullOrWhiteSpace(item.Record.GitTreeAfter))
-                                                        {
-                                                            <option value="@item.Record.GitTreeAfter">After #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
-                                                        }
-                                                    }
-                                            </select>
-                                        </label>
-                                        <span class="git-ref-arrow">→</span>
-                                        <label class="git-ref-label">
-                                            <span>To</span>
-                                            <select class="git-ref-select" value="@_gitTargetRef" @onchange="OnGitTargetRefChanged">
-                                                <option value="WORKING">Working Tree (Current Files)</option>
-                                                @foreach (var item in ConversationsWithSnapshots)
-                                                {
-                                                    if (!string.IsNullOrWhiteSpace(item.Record.GitTreeAfter))
-                                                    {
-                                                        <option value="@item.Record.GitTreeAfter">After #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
-                                                    }
-                                                    if (!string.IsNullOrWhiteSpace(item.Record.GitTreeBefore))
-                                                    {
-                                                        <option value="@item.Record.GitTreeBefore">Before #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
-                                                    }
-                                                }
-                                            </select>
-                                        </label>
-                                    </div>
-                                }
-                            }
-
-                            <div class="git-file-filter-box">
-                                <input type="text"
-                                       class="git-file-filter-input"
-                                       placeholder="Filter by file path (e.g. omp-addon/extensions/omp-history.ts)…"
-                                       @bind="_gitFileFilter"
-                                       @bind:event="oninput"
-                                       @onkeydown="HandleGitFilterKeyDown" />
-                                @if (!string.IsNullOrWhiteSpace(_gitFileFilter))
-                                {
-                                    <button type="button"
-                                            class="git-file-filter-clear"
-                                            title="Show all files"
-                                            @onclick="ClearGitFileFilter">×</button>
-                                }
-                                <button type="button"
-                                        class="git-action-btn"
-                                        @onclick="RunGitDiff">
-                                    Apply
-                                </button>
-                            </div>
-                        </div>
-
-                        @if (_gitDiffResult?.IsAvailable == true && _gitDiffResult.ChangedFiles.Count > 0)
-                        {
-                            <div class="git-files-bar">
-                                <div class="git-stats-summary">
-                                    <span><strong>@_gitDiffResult.ChangedFiles.Count</strong> @(_gitDiffResult.ChangedFiles.Count == 1 ? "file" : "files") changed</span>
-                                    <span class="git-stat-add">+@_gitDiffResult.TotalAdditions</span>
-                                    <span class="git-stat-del">-@_gitDiffResult.TotalDeletions</span>
-                                    <span class="response-context-hint">• Select diff lines &amp; right-click to send Feedback to OMP</span>
-                                </div>
-                                <div class="git-file-chips">
-                                    <button type="button"
-                                            class="git-file-chip @(string.IsNullOrWhiteSpace(_gitFileFilter) ? "active" : "")"
-                                            @onclick="ClearGitFileFilter">
-                                        All files
-                                    </button>
-                                    @foreach (var f in _gitDiffResult.ChangedFiles)
-                                    {
-                                        var isFileSelected = string.Equals(_gitFileFilter?.Trim(), f.Path, StringComparison.Ordinal);
-                                        <button type="button"
-                                                class="git-file-chip @(isFileSelected ? "active" : "")"
-                                                title="@f.Path (+@f.Additions / -@f.Deletions)"
-                                                @onclick="() => ToggleGitFileChip(f.Path)">
-                                            <span class="git-file-status status-@f.Status.ToLowerInvariant()">@f.Status</span>
-                                            <span class="git-file-name">@f.Path</span>
-                                            <span class="git-stat-add">+@f.Additions</span>
-                                            <span class="git-stat-del">-@f.Deletions</span>
-                                        </button>
-                                    }
-                                </div>
-                            </div>
-                        }
-                    </section>
-
-                    @if (_gitOverview?.IsAvailable != true)
-                    {
-                        <div class="git-empty-box">
-                            <div class="empty-state">@(_gitOverview?.Error ?? "Local git repository not found.")</div>
-                        </div>
-                    }
-                    else if (!string.IsNullOrEmpty(_gitDiffResult?.Error))
-                    {
-                        <div class="git-empty-box">
-                            <div class="empty-state">@_gitDiffResult.Error</div>
-                        </div>
-                    }
-                    else if (string.IsNullOrWhiteSpace(_gitDiffResult?.RawDiff))
-                    {
-                        <div class="git-empty-box">
-                            <div class="empty-state">
-                                No differences found for <strong>@(_gitDiffResult?.Title ?? _gitCompareMode)</strong>@(string.IsNullOrWhiteSpace(_gitFileFilter) ? "." : $" matching '{_gitFileFilter}'.")
-                            </div>
-                        </div>
-                    }
-                    else
-                    {
-                        <div id="omp-git-diff-container" class="omp-diff2html-wrapper"></div>
-                    }
-                </div>
+                <GitComparePanel SelectedRepo="@_selectedRepo"
+                                 GitOverview="_gitOverview"
+                                 GitDiffResult="_gitDiffResult"
+                                 GitCompareMode="@_gitCompareMode"
+                                 GitOutputFormat="@_gitOutputFormat"
+                                 GitBaseRef="@_gitBaseRef"
+                                 GitTargetRef="@_gitTargetRef"
+                                 GitFileFilter="@_gitFileFilter"
+                                 FeedbackStatusMessage="@_feedbackStatusMessage"
+                                 ConversationsWithSnapshots="ConversationsWithSnapshots"
+                                 OnContextMenu="HandleDetailContextMenuAsync"
+                                 OnSetGitOutputFormat="SetGitOutputFormat"
+                                 OnRefreshGitCompare="RefreshGitCompare"
+                                 OnCloseGitCompare="CloseGitCompare"
+                                 OnSelectGitMode="SelectGitMode"
+                                 OnGitSingleCommitChanged="OnGitSingleCommitChanged"
+                                 OnGitBaseRefChanged="OnGitBaseRefChanged"
+                                 OnGitTargetRefChanged="OnGitTargetRefChanged"
+                                 OnGitFileFilterInput="(val) => _gitFileFilter = val"
+                                 OnGitFilterKeyDown="HandleGitFilterKeyDown"
+                                 OnClearGitFileFilter="ClearGitFileFilter"
+                                 OnRunGitDiff="RunGitDiff"
+                                 OnToggleGitFileChip="ToggleGitFileChip" />
             }
             else if (_leftPaneTab == "suggestions" && SelectedSuggestion is not null)
             {
@@ -959,147 +316,6 @@
                     }
                 </div>
             }
-
-            @if (_isFeedbackOpen && (_isGitCompareOpen || SelectedConversation is not null))
-            {
-                    <div class="word-comment-backdrop" @onclick="CloseFeedbackCard">
-                        <div class="word-comment-card"
-                             style="top: @(_feedbackTopPx)px;"
-                             role="dialog"
-                             aria-label="Feedback Comment"
-                             @onclick:stopPropagation="true"
-                             @oncontextmenu:stopPropagation="true">
-                            <div class="word-comment-accent"></div>
-                            <div class="word-comment-content">
-                                <div class="word-comment-header">
-                                    <div class="word-comment-author">
-                                        <span class="word-comment-avatar">F</span>
-                                        <div class="word-comment-author-meta">
-                                            <span class="word-comment-author-name">Feedback to OMP</span>
-                                            <span class="word-comment-timestamp">Just now</span>
-                                        </div>
-                                    </div>
-                                    <button type="button"
-                                            class="word-comment-close"
-                                            title="Discard comment"
-                                            aria-label="Close comment"
-                                            @onclick="CloseFeedbackCard">×</button>
-                                </div>
-
-                                @if (!IsSelectedSessionActive)
-                                {
-                                    <div class="word-comment-warning" role="alert">
-                                        <strong>Warning:</strong> This session is not the active OMP session.
-                                        @if (ActiveSessionInRepo is not null)
-                                        {
-                                            <span>The active session is <strong>@ActiveSessionInRepo.Name</strong>.</span>
-                                        }
-                                        else
-                                        {
-                                            <span>No active OMP session detected for this repo.</span>
-                                        }
-                                    </div>
-                                }
-
-                                @if (_feedbackDrafts.Count > 0)
-                                {
-                                    <div class="word-comment-batch-preview">
-                                        <div class="word-comment-batch-header">
-                                            <span>Staged batch (@_feedbackDrafts.Count)</span>
-                                            <button type="button"
-                                                    class="word-comment-quote-clear"
-                                                    title="Clear all staged comments"
-                                                    @onclick="ClearFeedbackBatch">Clear all</button>
-                                        </div>
-                                        <div class="word-comment-batch-items">
-                                            @for (var i = 0; i < _feedbackDrafts.Count; i++)
-                                            {
-                                                var idx = i;
-                                                var d = _feedbackDrafts[i];
-                                                <div class="word-comment-batch-chip">
-                                                    <span class="word-comment-batch-chip-num">#@(idx + 1)</span>
-                                                    <span class="word-comment-batch-chip-text" title="@d.Comment">
-                                                        @if (!string.IsNullOrWhiteSpace(d.LocationContext))
-                                                        {
-                                                            <strong>[@TruncatePreview(d.LocationContext, 36)]</strong>
-                                                            <span> </span>
-                                                        }
-                                                        @TruncatePreview(d.Comment, 55)
-                                                    </span>
-                                                    <button type="button"
-                                                            class="word-comment-quote-clear"
-                                                            title="Remove item"
-                                                            @onclick="() => RemoveFeedbackDraft(d.Id)">×</button>
-                                                </div>
-                                            }
-                                        </div>
-                                    </div>
-                                }
-
-                                @if (!string.IsNullOrWhiteSpace(_feedbackLocationContext) || !string.IsNullOrWhiteSpace(_feedbackQuotedText))
-                                {
-                                    <div class="word-comment-quote">
-                                        <div class="word-comment-quote-header">
-                                            <div class="word-comment-quote-meta">
-                                                <span>Target</span>
-                                                @if (SelectedTurnNumber is > 0 && !_isGitCompareOpen)
-                                                {
-                                                    <span class="feedback-location-pill">Turn #@SelectedTurnNumber</span>
-                                                }
-                                                @if (!string.IsNullOrWhiteSpace(_feedbackLocationContext))
-                                                {
-                                                    <span class="feedback-location-pill" title="@_feedbackLocationContext">@_feedbackLocationContext</span>
-                                                }
-                                            </div>
-                                            <button type="button"
-                                                    class="word-comment-quote-clear"
-                                                    title="Remove target quote &amp; position"
-                                                    @onclick="ClearFeedbackQuote">×</button>
-                                        </div>
-                                        @if (!string.IsNullOrWhiteSpace(_feedbackQuotedText))
-                                        {
-                                            <blockquote>@_feedbackQuotedText</blockquote>
-                                        }
-                                    </div>
-                                }
-
-                                <textarea id="word-comment-textarea"
-                                          @key="_feedbackOpenNonce"
-                                          class="word-comment-textarea"
-                                          rows="3"
-                                          placeholder="Add comment… (Alt+Enter: Add to batch • Ctrl+Enter: Send)"
-                                          @bind="_feedbackComment"
-                                          @bind:event="oninput"
-                                          @onkeydown="HandleFeedbackKeyDown"
-                                          @onkeydown:preventDefault="@_feedbackPreventKeyDefault"></textarea>
-                                <div class="word-comment-footer">
-                                    <button type="button"
-                                            class="word-comment-btn word-comment-btn-cancel"
-                                            @onclick="CloseFeedbackCard">
-                                        Close
-                                    </button>
-                                    <button type="button"
-                                            class="word-comment-btn word-comment-btn-stage"
-                                            disabled="@string.IsNullOrWhiteSpace(_feedbackComment)"
-                                            title="Stage this comment and continue selecting other parts (Alt+Enter)"
-                                            @onclick="AddFeedbackToBatch">
-                                        <span>+ Add to Batch</span>
-                                    </button>
-                                    <button type="button"
-                                            class="word-comment-btn word-comment-btn-post"
-                                            disabled="@(string.IsNullOrWhiteSpace(_feedbackComment) && _feedbackDrafts.Count == 0)"
-                                            title="Send comment(s) to OMP now (Ctrl+Enter)"
-                                            @onclick="SubmitFeedback">
-                                        <span>@SendFeedbackButtonLabel</span>
-                                        <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
-                                            <path d="M1.5 1.5L14.5 8L1.5 14.5L3.5 8L1.5 1.5ZM4.8 8.7L3.2 12.6L12.1 8L3.2 3.4L4.8 7.3H9.5V8.7H4.8Z" />
-                                        </svg>
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-            }
         </main>
     </div>
 
@@ -1214,16 +430,7 @@
 </div>
 
 @code {
-    private sealed record IndexedConversation(int TurnNumber, ConversationRecord Record);
     private sealed record SelectionCaptureResult(string? Text, string? LocationContext);
-
-    private static readonly MarkdownPipeline Pipeline = new MarkdownPipelineBuilder()
-        .UseAdvancedExtensions()
-        .Build();
-
-    private static readonly Regex EmbeddedMarkdownBlockRegex = new(
-        @"<pre><code class=""language-(?:markdown|md)"">([\s\S]*?)</code></pre>",
-        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private IReadOnlyList<RepoSummary> _repos = [];
     private IReadOnlyList<SessionRecord> _sessions = [];
@@ -2322,111 +1529,6 @@
         _cachedMdSuggestionAgentHtml = RenderMarkdown(sug.AgentContext);
         return _cachedMdSuggestionAgentHtml;
     }
-
-    private static string RenderMarkdown(string? markdown)
-    {
-        if (string.IsNullOrWhiteSpace(markdown))
-        {
-            return "<em>(Empty response)</em>";
-        }
-        return RenderMarkdownPass(markdown, depth: 0);
-    }
-
-    private static string RenderMarkdownPass(string markdown, int depth)
-    {
-        var html = Markdown.ToHtml(markdown, Pipeline);
-        if (depth >= 2)
-        {
-            return html;
-        }
-
-        return EmbeddedMarkdownBlockRegex.Replace(html, match =>
-        {
-            var innerMarkdown = System.Net.WebUtility.HtmlDecode(match.Groups[1].Value);
-            var innerHtml = RenderMarkdownPass(innerMarkdown, depth + 1);
-            return $"<div class=\"embedded-markdown\">{innerHtml}</div>";
-        });
-    }
-
-    private static string TruncatePreview(string? text, int maxLength)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return "(empty)";
-        }
-
-        var singleLine = string.Join(" ", text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
-        return singleLine.Length <= maxLength ? singleLine : singleLine[..maxLength] + "…";
-    }
-
-    private static string FormatTimestamp(string iso)
-    {
-        if (DateTimeOffset.TryParse(iso, out var dto))
-        {
-            var local = dto.ToLocalTime();
-            if (local.Date == DateTimeOffset.Now.Date)
-            {
-                return local.ToString("HH:mm:ss");
-            }
-            return local.ToString("yyyy-MM-dd HH:mm");
-        }
-        return iso;
-    }
-
-    private static string FormatFullDateTime(string iso)
-    {
-        if (DateTimeOffset.TryParse(iso, out var dto))
-        {
-            return dto.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
-        }
-        return iso;
-    }
-    private static string FormatCredits(double? credits)
-    {
-        if (!credits.HasValue)
-        {
-            return "N/A";
-        }
-        return credits.Value.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
-    }
-
-    private static string FormatTokens(long tokens)
-    {
-        if (tokens >= 1_000_000)
-        {
-            return $"{(tokens / 1_000_000.0).ToString("0.1", System.Globalization.CultureInfo.InvariantCulture)}M";
-        }
-        if (tokens >= 1_000)
-        {
-            return $"{(tokens / 1_000.0).ToString("0.1", System.Globalization.CultureInfo.InvariantCulture)}k";
-        }
-        return tokens.ToString(System.Globalization.CultureInfo.InvariantCulture);
-    }
-
-    private static string FormatUsageTooltip(double? credits, double? costUsd, long? totalTokens, string? model = null)
-    {
-        if (!credits.HasValue && !costUsd.HasValue && !totalTokens.HasValue)
-        {
-            return "Usage data: N/A (recorded before credit tracking)";
-        }
-
-        var parts = new List<string>(4);
-        if (!string.IsNullOrWhiteSpace(model))
-        {
-            parts.Add($"Model: {model}");
-        }
-        parts.Add($"Credits: {(credits.HasValue ? credits.Value.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) : "N/A")}");
-        if (costUsd.HasValue)
-        {
-            parts.Add($"Est. Cost: ${costUsd.Value.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture)}");
-        }
-        if (totalTokens.HasValue)
-        {
-            parts.Add($"Tokens: {totalTokens.Value:N0}");
-        }
-        return string.Join(" • ", parts);
-    }
-
 
     public void Dispose()
     {

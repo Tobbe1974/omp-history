@@ -1,0 +1,282 @@
+@if (FeedbackDrafts.Count > 0 && !IsFeedbackOpen)
+{
+    <div class="feedback-batch-bar">
+        <div class="feedback-batch-bar-main">
+            <div class="feedback-batch-summary" @onclick="OnToggleFeedbackBatchExpanded" title="Click to review or edit queued comments">
+                <span class="feedback-batch-badge">@FeedbackDrafts.Count</span>
+                <span class="feedback-batch-label">
+                    @(FeedbackDrafts.Count == 1 ? "1 staged comment" : $"{FeedbackDrafts.Count} staged comments") ready to send
+                </span>
+                <span class="feedback-batch-chevron">@(IsFeedbackBatchExpanded ? "▾" : "▸")</span>
+            </div>
+            <div class="feedback-batch-actions">
+                <button type="button"
+                        class="word-comment-btn word-comment-btn-cancel"
+                        title="Discard all staged comments"
+                        @onclick="OnClearFeedbackBatch">
+                    Clear All
+                </button>
+                <button type="button"
+                        class="word-comment-btn word-comment-btn-post"
+                        title="Send all staged comments to OMP in a single prompt"
+                        @onclick="OnSubmitFeedbackBatchOnly">
+                    <span>Send All (@FeedbackDrafts.Count)</span>
+                    <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
+                        <path d="M1.5 1.5L14.5 8L1.5 14.5L3.5 8L1.5 1.5ZM4.8 8.7L3.2 12.6L12.1 8L3.2 3.4L4.8 7.3H9.5V8.7H4.8Z" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        @if (IsFeedbackBatchExpanded)
+        {
+            <div class="feedback-batch-list">
+                @for (var i = 0; i < FeedbackDrafts.Count; i++)
+                {
+                    var idx = i;
+                    var draft = FeedbackDrafts[i];
+                    <div class="feedback-batch-item">
+                        <div class="feedback-batch-item-header">
+                            <span class="feedback-batch-item-num">#@(idx + 1)</span>
+                            @if (draft.TurnNumber is > 0)
+                            {
+                                <span class="feedback-location-pill">Turn #@draft.TurnNumber</span>
+                            }
+                            @if (!string.IsNullOrWhiteSpace(draft.LocationContext))
+                            {
+                                <span class="feedback-location-pill">@draft.LocationContext</span>
+                            }
+                            <button type="button"
+                                    class="feedback-batch-item-remove"
+                                    title="Remove this comment"
+                                    @onclick="() => OnRemoveFeedbackDraft.InvokeAsync(draft.Id)">×</button>
+                        </div>
+                        @if (!string.IsNullOrWhiteSpace(draft.QuotedText))
+                        {
+                            <div class="feedback-batch-item-quote">“@TruncatePreview(draft.QuotedText, 120)”</div>
+                        }
+                        <div class="feedback-batch-item-comment">@draft.Comment</div>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+}
+
+@if (IsFeedbackOpen && CanShowFeedbackModal)
+{
+    <div class="word-comment-backdrop" @onclick="OnCloseFeedbackCard">
+        <div class="word-comment-card"
+             style="top: @(FeedbackTopPx)px;"
+             role="dialog"
+             aria-label="Feedback Comment"
+             @onclick:stopPropagation="true"
+             @oncontextmenu:stopPropagation="true">
+            <div class="word-comment-accent"></div>
+            <div class="word-comment-content">
+                <div class="word-comment-header">
+                    <div class="word-comment-author">
+                        <span class="word-comment-avatar">F</span>
+                        <div class="word-comment-author-meta">
+                            <span class="word-comment-author-name">Feedback to OMP</span>
+                            <span class="word-comment-timestamp">Just now</span>
+                        </div>
+                    </div>
+                    <button type="button"
+                            class="word-comment-close"
+                            title="Discard comment"
+                            aria-label="Close comment"
+                            @onclick="OnCloseFeedbackCard">×</button>
+                </div>
+
+                @if (!IsSelectedSessionActive)
+                {
+                    <div class="word-comment-warning" role="alert">
+                        <strong>Warning:</strong> This session is not the active OMP session.
+                        @if (ActiveSessionInRepo is not null)
+                        {
+                            <span>The active session is <strong>@ActiveSessionInRepo.Name</strong>.</span>
+                        }
+                        else
+                        {
+                            <span>No active OMP session detected for this repo.</span>
+                        }
+                    </div>
+                }
+
+                @if (FeedbackDrafts.Count > 0)
+                {
+                    <div class="word-comment-batch-preview">
+                        <div class="word-comment-batch-header">
+                            <span>Staged batch (@FeedbackDrafts.Count)</span>
+                            <button type="button"
+                                    class="word-comment-quote-clear"
+                                    title="Clear all staged comments"
+                                    @onclick="OnClearFeedbackBatch">Clear all</button>
+                        </div>
+                        <div class="word-comment-batch-items">
+                            @for (var i = 0; i < FeedbackDrafts.Count; i++)
+                            {
+                                var idx = i;
+                                var d = FeedbackDrafts[i];
+                                <div class="word-comment-batch-chip">
+                                    <span class="word-comment-batch-chip-num">#@(idx + 1)</span>
+                                    <span class="word-comment-batch-chip-text" title="@d.Comment">
+                                        @if (!string.IsNullOrWhiteSpace(d.LocationContext))
+                                        {
+                                            <strong>[@TruncatePreview(d.LocationContext, 36)]</strong>
+                                            <span> </span>
+                                        }
+                                        @TruncatePreview(d.Comment, 55)
+                                    </span>
+                                    <button type="button"
+                                            class="word-comment-quote-clear"
+                                            title="Remove item"
+                                            @onclick="() => OnRemoveFeedbackDraft.InvokeAsync(d.Id)">×</button>
+                                </div>
+                            }
+                        </div>
+                    </div>
+                }
+
+                @if (!string.IsNullOrWhiteSpace(FeedbackLocationContext) || !string.IsNullOrWhiteSpace(FeedbackQuotedText))
+                {
+                    <div class="word-comment-quote">
+                        <div class="word-comment-quote-header">
+                            <div class="word-comment-quote-meta">
+                                <span>Target</span>
+                                @if (SelectedTurnNumber is > 0 && !IsGitCompareOpen)
+                                {
+                                    <span class="feedback-location-pill">Turn #@SelectedTurnNumber</span>
+                                }
+                                @if (!string.IsNullOrWhiteSpace(FeedbackLocationContext))
+                                {
+                                    <span class="feedback-location-pill" title="@FeedbackLocationContext">@FeedbackLocationContext</span>
+                                }
+                            </div>
+                            <button type="button"
+                                    class="word-comment-quote-clear"
+                                    title="Remove target quote &amp; position"
+                                    @onclick="OnClearFeedbackQuote">×</button>
+                        </div>
+                        @if (!string.IsNullOrWhiteSpace(FeedbackQuotedText))
+                        {
+                            <blockquote>@FeedbackQuotedText</blockquote>
+                        }
+                    </div>
+                }
+
+                <textarea id="word-comment-textarea"
+                          @key="FeedbackOpenNonce"
+                          class="word-comment-textarea"
+                          rows="3"
+                          placeholder="Add comment… (Alt+Enter: Add to batch • Ctrl+Enter: Send)"
+                          value="@FeedbackComment"
+                          @oninput="(e) => OnFeedbackCommentInput.InvokeAsync(e.Value?.ToString() ?? string.Empty)"
+                          @onkeydown="OnFeedbackKeyDown"
+                          @onkeydown:preventDefault="@FeedbackPreventKeyDefault"></textarea>
+                <div class="word-comment-footer">
+                    <button type="button"
+                            class="word-comment-btn word-comment-btn-cancel"
+                            @onclick="OnCloseFeedbackCard">
+                        Close
+                    </button>
+                    <button type="button"
+                            class="word-comment-btn word-comment-btn-stage"
+                            disabled="@string.IsNullOrWhiteSpace(FeedbackComment)"
+                            title="Stage this comment and continue selecting other parts (Alt+Enter)"
+                            @onclick="OnAddFeedbackToBatch">
+                        <span>+ Add to Batch</span>
+                    </button>
+                    <button type="button"
+                            class="word-comment-btn word-comment-btn-post"
+                            disabled="@(string.IsNullOrWhiteSpace(FeedbackComment) && FeedbackDrafts.Count == 0)"
+                            title="Send comment(s) to OMP now (Ctrl+Enter)"
+                            @onclick="OnSubmitFeedback">
+                        <span>@SendFeedbackButtonLabel</span>
+                        <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
+                            <path d="M1.5 1.5L14.5 8L1.5 14.5L3.5 8L1.5 1.5ZM4.8 8.7L3.2 12.6L12.1 8L3.2 3.4L4.8 7.3H9.5V8.7H4.8Z" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired]
+    public IReadOnlyList<FeedbackDraftItem> FeedbackDrafts { get; set; } = [];
+
+    [Parameter]
+    public bool IsFeedbackOpen { get; set; }
+
+    [Parameter]
+    public bool CanShowFeedbackModal { get; set; }
+
+    [Parameter]
+    public bool IsFeedbackBatchExpanded { get; set; }
+
+    [Parameter]
+    public int FeedbackTopPx { get; set; } = 140;
+
+    [Parameter]
+    public int FeedbackOpenNonce { get; set; }
+
+    [Parameter]
+    public bool FeedbackPreventKeyDefault { get; set; }
+
+    [Parameter]
+    public string FeedbackComment { get; set; } = string.Empty;
+
+    [Parameter]
+    public string? FeedbackQuotedText { get; set; }
+
+    [Parameter]
+    public string? FeedbackLocationContext { get; set; }
+
+    [Parameter]
+    public int? SelectedTurnNumber { get; set; }
+
+    [Parameter]
+    public bool IsGitCompareOpen { get; set; }
+
+    [Parameter]
+    public bool IsSelectedSessionActive { get; set; }
+
+    [Parameter]
+    public SessionRecord? ActiveSessionInRepo { get; set; }
+
+    [Parameter]
+    public string SendFeedbackButtonLabel { get; set; } = "Send";
+
+    [Parameter]
+    public EventCallback OnToggleFeedbackBatchExpanded { get; set; }
+
+    [Parameter]
+    public EventCallback OnClearFeedbackBatch { get; set; }
+
+    [Parameter]
+    public EventCallback OnSubmitFeedbackBatchOnly { get; set; }
+
+    [Parameter]
+    public EventCallback<string> OnRemoveFeedbackDraft { get; set; }
+
+    [Parameter]
+    public EventCallback OnCloseFeedbackCard { get; set; }
+
+    [Parameter]
+    public EventCallback OnClearFeedbackQuote { get; set; }
+
+    [Parameter]
+    public EventCallback<string> OnFeedbackCommentInput { get; set; }
+
+    [Parameter]
+    public EventCallback<KeyboardEventArgs> OnFeedbackKeyDown { get; set; }
+
+    [Parameter]
+    public EventCallback OnAddFeedbackToBatch { get; set; }
+
+    [Parameter]
+    public EventCallback OnSubmitFeedback { get; set; }
+}

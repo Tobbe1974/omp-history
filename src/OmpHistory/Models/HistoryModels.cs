@@ -31,6 +31,11 @@ public sealed record ConversationRecord(
     long? TotalTokens = null,
     string? Model = null,
     int SuggestionCount = 0);
+
+public sealed record IndexedConversation(
+    int TurnNumber,
+    ConversationRecord Record);
+
 public sealed record CreateSessionRequest(
     string SessionId,
     string Repo,

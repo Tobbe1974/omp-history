@@ -1,0 +1,136 @@
+<section class="pane conversations-pane" aria-label="Conversations">
+    <div class="pane-header">
+        <span>
+            CONVERSATIONS
+            @if (TotalConversationsCount > 0)
+            {
+                if (HasActiveFilter)
+                {
+                    <span>(@FilteredConversations.Count / @TotalConversationsCount)</span>
+                }
+                else
+                {
+                    <span>(@TotalConversationsCount)</span>
+                }
+            }
+        </span>
+
+        <div class="pane-header-actions">
+            @if (HasActiveFilter)
+            {
+                <span class="active-filter-chip" title="Filtered by: @AppliedFilter">@AppliedFilter</span>
+                <button type="button"
+                        class="funnel-btn clear-funnel-btn"
+                        title="Remove filter"
+                        aria-label="Remove conversation filter"
+                        @onclick="OnClearFilter">
+                    <svg viewBox="0 0 20 20" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M2.5 3.5h13l-5 6v5l-3 1.5v-6.5l-5-6z" />
+                        <path d="M14.5 12.5l4 4m0-4l-4 4" stroke-width="2" />
+                    </svg>
+                </button>
+            }
+            <button type="button"
+                    class="funnel-btn @(HasActiveFilter || IsFilterModalOpen ? "active" : "")"
+                    title="Filter conversations"
+                    aria-label="Filter conversations"
+                    @onclick="OnOpenFilterModal">
+                <svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M2.5 3.5h15l-6 6.5v5.5l-3 1.5v-7l-6-6.5z" />
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <div class="pane-body">
+        @if (string.IsNullOrEmpty(SelectedSessionId))
+        {
+            <div class="empty-state">Select a session to view its conversations.</div>
+        }
+        else if (TotalConversationsCount == 0)
+        {
+            <div class="empty-state">No conversations recorded for this session yet.</div>
+        }
+        else if (FilteredConversations.Count == 0)
+        {
+            <div class="empty-state">
+                No conversations match <strong>"@AppliedFilter"</strong>.
+            </div>
+        }
+        else
+        {
+            @foreach (var item in FilteredConversations)
+            {
+                var conv = item.Record;
+                var isSelected = conv.Id == SelectedConversationId;
+                var hasTurnDiff = !string.IsNullOrWhiteSpace(conv.DiffPatch);
+                var hasTreeSnapshot = !string.IsNullOrWhiteSpace(conv.GitTreeBefore) || !string.IsNullOrWhiteSpace(conv.GitTreeAfter);
+                <div class="list-card conversation-card @(isSelected ? "selected" : "")"
+                     @onclick="() => OnSelectConversation.InvokeAsync(conv.Id)">
+                    <div class="conversation-header">
+                        <div class="conversation-header-left">
+                            <span class="turn-badge">#@item.TurnNumber</span>
+                            @if (hasTurnDiff)
+                            {
+                                var parsedSummary = GitCompareService.ParseUnifiedDiff(conv.DiffPatch);
+                                <span class="turn-diff-badge" title="@parsedSummary.ChangedFiles.Count file(s) changed (+@parsedSummary.TotalAdditions / -@parsedSummary.TotalDeletions)">
+                                    <span class="git-stat-add">+@parsedSummary.TotalAdditions</span>
+                                    <span class="git-stat-del">-@parsedSummary.TotalDeletions</span>
+                                </span>
+                            }
+                            else if (hasTreeSnapshot)
+                            {
+                                <span class="turn-snapshot-dot" title="Git snapshot recorded for this turn"></span>
+                            }
+                            @if (conv.SuggestionCount > 0)
+                            {
+                                <span class="turn-suggestion-badge"
+                                      title="@($"{conv.SuggestionCount} change {(conv.SuggestionCount == 1 ? "suggestion" : "suggestions")} noted during this turn")">
+                                    💡 @conv.SuggestionCount
+                                </span>
+                            }
+                            <span class="turn-credits-badge @(conv.CreditsUsed.HasValue ? "" : "usage-na")"
+                                  title="@FormatUsageTooltip(conv.CreditsUsed, conv.CostUsd, conv.TotalTokens, conv.Model)">
+                                Cr: @FormatCredits(conv.CreditsUsed)
+                            </span>
+                        </div>
+                        <span class="turn-time">@FormatTimestamp(conv.CreatedAt)</span>
+                    </div>
+                    <div class="conversation-preview">@TruncatePreview(conv.Prompt, 110)</div>
+                </div>
+            }
+        }
+    </div>
+</section>
+
+@code {
+    [Parameter]
+    public string? SelectedSessionId { get; set; }
+
+    [Parameter]
+    public int TotalConversationsCount { get; set; }
+
+    [Parameter, EditorRequired]
+    public IReadOnlyList<IndexedConversation> FilteredConversations { get; set; } = [];
+
+    [Parameter]
+    public long? SelectedConversationId { get; set; }
+
+    [Parameter]
+    public bool HasActiveFilter { get; set; }
+
+    [Parameter]
+    public string AppliedFilter { get; set; } = string.Empty;
+
+    [Parameter]
+    public bool IsFilterModalOpen { get; set; }
+
+    [Parameter]
+    public EventCallback<long> OnSelectConversation { get; set; }
+
+    [Parameter]
+    public EventCallback OnClearFilter { get; set; }
+
+    [Parameter]
+    public EventCallback OnOpenFilterModal { get; set; }
+}

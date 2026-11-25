@@ -1,0 +1,137 @@
+<header class="history-header">
+    <div class="brand">
+        <span class="brand-dot"></span>
+        <span class="brand-title">OMP History</span>
+    </div>
+
+    <div class="repo-selector">
+        <span class="repo-label">REPO</span>
+        @if (Repos.Count == 0)
+        {
+            <span class="repo-empty">No repositories recorded yet</span>
+        }
+        else
+        {
+            <div class="repo-pills" role="tablist" aria-label="Repositories">
+                @foreach (var repo in Repos)
+                {
+                    var isSelected = string.Equals(repo.Repo, SelectedRepo, StringComparison.Ordinal);
+                    <button type="button"
+                            class="repo-pill @(isSelected ? "active" : "")"
+                            @onclick="() => OnSelectRepo.InvokeAsync(repo.Repo)">
+                        <span class="repo-name">@repo.Repo</span>
+                        <span class="repo-count">@repo.SessionCount</span>
+                    </button>
+                }
+            </div>
+        }
+    </div>
+
+    <div class="header-actions">
+        @if (CopilotQuota is not null && CopilotQuota.Entitlement > 0)
+        {
+            var usedPct = Math.Clamp((CopilotQuota.CreditsUsed / CopilotQuota.Entitlement) * 100.0, 0.0, 100.0);
+            var meterClass = usedPct >= 85.0
+                ? "meter-low"
+                : (usedPct >= 65.0 ? "meter-warn" : "meter-ok");
+            <div class="copilot-meter @meterClass"
+                 title="@($"Copilot AI Credits ({CopilotQuota.Plan ?? "account"}): {CopilotQuota.CreditsUsed:N1} used / {CopilotQuota.Entitlement:N0} total ({usedPct:0.0}% used • {CopilotQuota.Remaining:N1} remaining){(string.IsNullOrWhiteSpace(CopilotQuota.ResetDate) ? "" : $" • Resets {CopilotQuota.ResetDate}")}")">
+                <div class="copilot-meter-top">
+                    <span class="copilot-meter-label">COPILOT</span>
+                    <span class="copilot-meter-value">@($"{CopilotQuota.CreditsUsed:N0} / {CopilotQuota.Entitlement:N0}")</span>
+                    <span class="copilot-meter-pct">(@($"{usedPct:0.0}%"))</span>
+                </div>
+                <div class="copilot-meter-bar">
+                    <div class="copilot-meter-fill" style="width: @($"{usedPct.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)}%");"></div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="copilot-meter meter-na" title="Copilot AI credit quota will populate on next OMP session or turn">
+                <div class="copilot-meter-top">
+                    <span class="copilot-meter-label">COPILOT</span>
+                    <span class="copilot-meter-value">N/A</span>
+                </div>
+            </div>
+        }
+
+        <button type="button"
+                class="pin-panes-btn git-compare-header-btn @(IsGitCompareOpen ? "active" : "")"
+                title="@(IsGitCompareOpen ? "Close Git Compare and return to conversation" : "Open Git Compare for the selected repository")"
+                aria-label="Toggle Git Compare"
+                aria-pressed="@(IsGitCompareOpen ? "true" : "false")"
+                disabled="@string.IsNullOrEmpty(SelectedRepo)"
+                @onclick="OnToggleGitCompare">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="4" cy="3.5" r="1.75" />
+                <circle cx="4" cy="12.5" r="1.75" />
+                <circle cx="12" cy="12.5" r="1.75" />
+                <path d="M4 5.25v5.5M12 10.75V6.5a2.5 2.5 0 0 0-2.5-2.5H7" />
+                <path d="M8.5 2L6.5 4l2 2" />
+            </svg>
+            <span>Git Compare</span>
+        </button>
+
+        <button type="button"
+                class="pin-panes-btn @(LeftPaneTab == "suggestions" ? "active" : "")"
+                title="View change suggestions for the selected repository"
+                aria-label="Suggestions"
+                disabled="@string.IsNullOrEmpty(SelectedRepo)"
+                @onclick="OnOpenSuggestionsTab">
+            <span>Suggestions (@OpenSuggestionCount)</span>
+        </button>
+
+        <button type="button"
+                class="pin-panes-btn @(IsPanesPinned ? "active" : "")"
+                title="@(IsPanesPinned ? "Unpin to hide Sessions and Conversations" : "Pin to show Sessions and Conversations")"
+                aria-label="Pin Sessions and Conversations panes"
+                aria-pressed="@(IsPanesPinned ? "true" : "false")"
+                @onclick="OnTogglePanesPinned">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9.5 2.5L13.5 6.5L12 8L9.5 7.5L6.5 10.5L7 13L5.5 14.5L3 12L1.5 14.5L3.5 12.5L1.5 10.5L3 9L5.5 9.5L8.5 6.5L8 4L9.5 2.5Z" />
+            </svg>
+            <span>Pin Lists</span>
+        </button>
+
+        <div class="header-status">
+            <span class="live-indicator"></span>
+            <span>Live</span>
+        </div>
+    </div>
+</header>
+
+@code {
+    [Parameter, EditorRequired]
+    public IReadOnlyList<RepoSummary> Repos { get; set; } = [];
+
+    [Parameter]
+    public string? SelectedRepo { get; set; }
+
+    [Parameter]
+    public CopilotQuotaSnapshot? CopilotQuota { get; set; }
+
+    [Parameter]
+    public bool IsGitCompareOpen { get; set; }
+
+    [Parameter]
+    public string LeftPaneTab { get; set; } = "sessions";
+
+    [Parameter]
+    public int OpenSuggestionCount { get; set; }
+
+    [Parameter]
+    public bool IsPanesPinned { get; set; }
+
+    [Parameter]
+    public EventCallback<string> OnSelectRepo { get; set; }
+
+    [Parameter]
+    public EventCallback OnToggleGitCompare { get; set; }
+
+    [Parameter]
+    public EventCallback OnOpenSuggestionsTab { get; set; }
+
+    [Parameter]
+    public EventCallback OnTogglePanesPinned { get; set; }
+}

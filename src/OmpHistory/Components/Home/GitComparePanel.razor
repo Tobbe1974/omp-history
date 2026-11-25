@@ -1,0 +1,340 @@
+<div class="detail-scroll git-compare-scroll"
+     @oncontextmenu="OnContextMenu"
+     @oncontextmenu:preventDefault="true">
+    <section class="git-compare-toolbar-card" @oncontextmenu:stopPropagation="true">
+        <div class="git-compare-top-row">
+            <div class="git-compare-title-group">
+                <span class="git-compare-badge">GIT COMPARE</span>
+                <span class="git-compare-repo-name">@SelectedRepo</span>
+                @if (GitOverview?.IsAvailable == true)
+                {
+                    <span class="git-branch-chip" title="Current branch">
+                        ⎇ @GitOverview.CurrentBranch
+                    </span>
+                    @if (!string.IsNullOrEmpty(GitOverview.RepoPath))
+                    {
+                        <span class="git-repo-path" title="@GitOverview.RepoPath">@GitOverview.RepoPath</span>
+                    }
+                }
+            </div>
+
+            <div class="git-compare-top-actions">
+                @if (!string.IsNullOrEmpty(FeedbackStatusMessage))
+                {
+                    <span class="feedback-status-pill">@FeedbackStatusMessage</span>
+                }
+                <div class="git-format-toggle" role="group" aria-label="Diff layout">
+                    <button type="button"
+                            class="git-format-btn @(GitOutputFormat == "line-by-line" ? "active" : "")"
+                            @onclick='() => OnSetGitOutputFormat.InvokeAsync("line-by-line")'>
+                        Unified
+                    </button>
+                    <button type="button"
+                            class="git-format-btn @(GitOutputFormat == "side-by-side" ? "active" : "")"
+                            @onclick='() => OnSetGitOutputFormat.InvokeAsync("side-by-side")'>
+                        Side-by-Side
+                    </button>
+                </div>
+                <button type="button"
+                        class="git-action-btn"
+                        title="Refresh git status & diff"
+                        @onclick="OnRefreshGitCompare">
+                    ↻ Refresh
+                </button>
+                <button type="button"
+                        class="git-action-btn git-close-btn"
+                        title="Close Git Compare"
+                        @onclick="OnCloseGitCompare">
+                    ✕ Close
+                </button>
+            </div>
+        </div>
+
+        <div class="git-compare-controls-row">
+            <div class="git-mode-tabs" role="tablist" aria-label="What to compare">
+                <button type="button"
+                        class="git-mode-tab @(GitCompareMode == "working" ? "active" : "")"
+                        @onclick='() => OnSelectGitMode.InvokeAsync("working")'>
+                    <span>Working Tree</span>
+                    @if (GitOverview is not null && GitOverview.UncommittedFileCount > 0)
+                    {
+                        <span class="git-mode-count">@GitOverview.UncommittedFileCount</span>
+                    }
+                </button>
+                <button type="button"
+                        class="git-mode-tab @(GitCompareMode == "latest" ? "active" : "")"
+                        @onclick='() => OnSelectGitMode.InvokeAsync("latest")'>
+                    <span>Commit Changes</span>
+                </button>
+                <button type="button"
+                        class="git-mode-tab @(GitCompareMode == "compare" ? "active" : "")"
+                        @onclick='() => OnSelectGitMode.InvokeAsync("compare")'>
+                    <span>Compare Refs / Commits</span>
+                </button>
+                <button type="button"
+                        class="git-mode-tab @(GitCompareMode == "turns" ? "active" : "")"
+                        @onclick='() => OnSelectGitMode.InvokeAsync("turns")'>
+                    <span>Compare Messages</span>
+                    @if (ConversationsWithSnapshots.Count > 0)
+                    {
+                        <span class="git-mode-count">@ConversationsWithSnapshots.Count</span>
+                    }
+                </button>
+            </div>
+
+            @if (GitCompareMode == "latest" && GitOverview?.IsAvailable == true)
+            {
+                <div class="git-ref-selectors">
+                    <label class="git-ref-label">
+                        <span>Commit</span>
+                        <select class="git-ref-select" value="@GitTargetRef" @onchange="OnGitSingleCommitChanged">
+                            @foreach (var c in GitOverview.RecentCommits)
+                            {
+                                <option value="@c.ShortHash">@c.ShortHash — @TruncatePreview(c.Subject, 55) (@c.RelativeDate)</option>
+                            }
+                        </select>
+                    </label>
+                </div>
+            }
+            else if (GitCompareMode == "compare" && GitOverview?.IsAvailable == true)
+            {
+                <div class="git-ref-selectors">
+                    <label class="git-ref-label">
+                        <span>Base (From)</span>
+                        <select class="git-ref-select" value="@GitBaseRef" @onchange="OnGitBaseRefChanged">
+                            <optgroup label="Branches">
+                                @foreach (var b in GitOverview.Branches)
+                                {
+                                    <option value="@b">⎇ @b</option>
+                                }
+                            </optgroup>
+                            <optgroup label="Recent Commits">
+                                @foreach (var c in GitOverview.RecentCommits)
+                                {
+                                    <option value="@c.ShortHash">@c.ShortHash — @TruncatePreview(c.Subject, 45) (@c.RelativeDate)</option>
+                                }
+                            </optgroup>
+                        </select>
+                    </label>
+                    <span class="git-ref-arrow">→</span>
+                    <label class="git-ref-label">
+                        <span>Target (To)</span>
+                        <select class="git-ref-select" value="@GitTargetRef" @onchange="OnGitTargetRefChanged">
+                            <option value="WORKING">Working Tree (Uncommitted + Committed)</option>
+                            <option value="HEAD">HEAD (@(GitOverview.HeadCommit ?? "latest"))</option>
+                            <optgroup label="Branches">
+                                @foreach (var b in GitOverview.Branches)
+                                {
+                                    <option value="@b">⎇ @b</option>
+                                }
+                            </optgroup>
+                            <optgroup label="Recent Commits">
+                                @foreach (var c in GitOverview.RecentCommits)
+                                {
+                                    <option value="@c.ShortHash">@c.ShortHash — @TruncatePreview(c.Subject, 45) (@c.RelativeDate)</option>
+                                }
+                            </optgroup>
+                        </select>
+                    </label>
+                </div>
+            }
+            else if (GitCompareMode == "turns")
+            {
+                @if (ConversationsWithSnapshots.Count == 0)
+                {
+                    <div class="git-ref-selectors">
+                        <span class="git-ref-label">No message git snapshots recorded in this session yet.</span>
+                    </div>
+                }
+                else
+                {
+                    <div class="git-ref-selectors">
+                        <label class="git-ref-label">
+                            <span>From</span>
+                            <select class="git-ref-select" value="@GitBaseRef" @onchange="OnGitBaseRefChanged">
+                                @foreach (var item in ConversationsWithSnapshots)
+                                {
+                                    if (!string.IsNullOrWhiteSpace(item.Record.GitTreeBefore))
+                                    {
+                                        <option value="@item.Record.GitTreeBefore">Before #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
+                                    }
+                                    if (!string.IsNullOrWhiteSpace(item.Record.GitTreeAfter))
+                                    {
+                                        <option value="@item.Record.GitTreeAfter">After #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
+                                    }
+                                }
+                            </select>
+                        </label>
+                        <span class="git-ref-arrow">→</span>
+                        <label class="git-ref-label">
+                            <span>To</span>
+                            <select class="git-ref-select" value="@GitTargetRef" @onchange="OnGitTargetRefChanged">
+                                <option value="WORKING">Working Tree (Current Files)</option>
+                                @foreach (var item in ConversationsWithSnapshots)
+                                {
+                                    if (!string.IsNullOrWhiteSpace(item.Record.GitTreeAfter))
+                                    {
+                                        <option value="@item.Record.GitTreeAfter">After #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
+                                    }
+                                    if (!string.IsNullOrWhiteSpace(item.Record.GitTreeBefore))
+                                    {
+                                        <option value="@item.Record.GitTreeBefore">Before #@item.TurnNumber — @TruncatePreview(item.Record.Prompt, 38)</option>
+                                    }
+                                }
+                            </select>
+                        </label>
+                    </div>
+                }
+            }
+
+            <div class="git-file-filter-box">
+                <input type="text"
+                       class="git-file-filter-input"
+                       placeholder="Filter by file path (e.g. omp-addon/extensions/omp-history.ts)…"
+                       value="@GitFileFilter"
+                       @oninput="(e) => OnGitFileFilterInput.InvokeAsync(e.Value?.ToString() ?? string.Empty)"
+                       @onkeydown="OnGitFilterKeyDown" />
+                @if (!string.IsNullOrWhiteSpace(GitFileFilter))
+                {
+                    <button type="button"
+                            class="git-file-filter-clear"
+                            title="Show all files"
+                            @onclick="OnClearGitFileFilter">×</button>
+                }
+                <button type="button"
+                        class="git-action-btn"
+                        @onclick="OnRunGitDiff">
+                    Apply
+                </button>
+            </div>
+        </div>
+
+        @if (GitDiffResult?.IsAvailable == true && GitDiffResult.ChangedFiles.Count > 0)
+        {
+            <div class="git-files-bar">
+                <div class="git-stats-summary">
+                    <span><strong>@GitDiffResult.ChangedFiles.Count</strong> @(GitDiffResult.ChangedFiles.Count == 1 ? "file" : "files") changed</span>
+                    <span class="git-stat-add">+@GitDiffResult.TotalAdditions</span>
+                    <span class="git-stat-del">-@GitDiffResult.TotalDeletions</span>
+                    <span class="response-context-hint">• Select diff lines &amp; right-click to send Feedback to OMP</span>
+                </div>
+                <div class="git-file-chips">
+                    <button type="button"
+                            class="git-file-chip @(string.IsNullOrWhiteSpace(GitFileFilter) ? "active" : "")"
+                            @onclick="OnClearGitFileFilter">
+                        All files
+                    </button>
+                    @foreach (var f in GitDiffResult.ChangedFiles)
+                    {
+                        var isFileSelected = string.Equals(GitFileFilter?.Trim(), f.Path, StringComparison.Ordinal);
+                        <button type="button"
+                                class="git-file-chip @(isFileSelected ? "active" : "")"
+                                title="@f.Path (+@f.Additions / -@f.Deletions)"
+                                @onclick="() => OnToggleGitFileChip.InvokeAsync(f.Path)">
+                            <span class="git-file-status status-@f.Status.ToLowerInvariant()">@f.Status</span>
+                            <span class="git-file-name">@f.Path</span>
+                            <span class="git-stat-add">+@f.Additions</span>
+                            <span class="git-stat-del">-@f.Deletions</span>
+                        </button>
+                    }
+                </div>
+            </div>
+        }
+    </section>
+
+    @if (GitOverview?.IsAvailable != true)
+    {
+        <div class="git-empty-box">
+            <div class="empty-state">@(GitOverview?.Error ?? "Local git repository not found.")</div>
+        </div>
+    }
+    else if (!string.IsNullOrEmpty(GitDiffResult?.Error))
+    {
+        <div class="git-empty-box">
+            <div class="empty-state">@GitDiffResult.Error</div>
+        </div>
+    }
+    else if (string.IsNullOrWhiteSpace(GitDiffResult?.RawDiff))
+    {
+        <div class="git-empty-box">
+            <div class="empty-state">
+                No differences found for <strong>@(GitDiffResult?.Title ?? GitCompareMode)</strong>@(string.IsNullOrWhiteSpace(GitFileFilter) ? "." : $" matching '{GitFileFilter}'.")
+            </div>
+        </div>
+    }
+    else
+    {
+        <div id="omp-git-diff-container" class="omp-diff2html-wrapper"></div>
+    }
+</div>
+
+@code {
+    [Parameter]
+    public string? SelectedRepo { get; set; }
+
+    [Parameter]
+    public GitRepoOverview? GitOverview { get; set; }
+
+    [Parameter]
+    public GitDiffResult? GitDiffResult { get; set; }
+
+    [Parameter]
+    public string GitCompareMode { get; set; } = "latest";
+
+    [Parameter]
+    public string GitOutputFormat { get; set; } = "line-by-line";
+
+    [Parameter]
+    public string GitBaseRef { get; set; } = "HEAD~1";
+
+    [Parameter]
+    public string GitTargetRef { get; set; } = "HEAD";
+
+    [Parameter]
+    public string GitFileFilter { get; set; } = string.Empty;
+
+    [Parameter]
+    public string? FeedbackStatusMessage { get; set; }
+
+    [Parameter, EditorRequired]
+    public IReadOnlyList<IndexedConversation> ConversationsWithSnapshots { get; set; } = [];
+
+    [Parameter]
+    public EventCallback<MouseEventArgs> OnContextMenu { get; set; }
+
+    [Parameter]
+    public EventCallback<string> OnSetGitOutputFormat { get; set; }
+
+    [Parameter]
+    public EventCallback OnRefreshGitCompare { get; set; }
+
+    [Parameter]
+    public EventCallback OnCloseGitCompare { get; set; }
+
+    [Parameter]
+    public EventCallback<string> OnSelectGitMode { get; set; }
+
+    [Parameter]
+    public EventCallback<ChangeEventArgs> OnGitSingleCommitChanged { get; set; }
+
+    [Parameter]
+    public EventCallback<ChangeEventArgs> OnGitBaseRefChanged { get; set; }
+
+    [Parameter]
+    public EventCallback<ChangeEventArgs> OnGitTargetRefChanged { get; set; }
+
+    [Parameter]
+    public EventCallback<string> OnGitFileFilterInput { get; set; }
+
+    [Parameter]
+    public EventCallback<KeyboardEventArgs> OnGitFilterKeyDown { get; set; }
+
+    [Parameter]
+    public EventCallback OnClearGitFileFilter { get; set; }
+
+    [Parameter]
+    public EventCallback OnRunGitDiff { get; set; }
+
+    [Parameter]
+    public EventCallback<string> OnToggleGitFileChip { get; set; }
+}

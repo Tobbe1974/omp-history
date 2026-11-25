@@ -215,7 +215,8 @@ api.MapPost("/conversations", (
         req.CreditsUsed,
         req.CostUsd,
         req.TotalTokens,
-        req.Model);
+        req.Model,
+        req.SuggestionIds);
     tracker.RecordHeartbeat(req.SessionId);
     if (req.CopilotQuota is not null)
     {
@@ -302,6 +303,60 @@ api.MapPost("/sessions/{sessionId}/feedback", (string sessionId, CreateFeedbackR
     {
         item,
         isSessionActive = tracker.IsSessionActive(sessionId)
+    });
+});
+
+api.MapGet("/repos/{repoName}/suggestions", (string repoName, HistoryRepository repo) =>
+    Results.Ok(repo.GetSuggestionsByRepo(repoName)));
+
+api.MapPost("/suggestions", (CreateSuggestionRequest req, HistoryRepository repo) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Title) && string.IsNullOrWhiteSpace(req.HumanSummary))
+    {
+        return Results.BadRequest(new { error = "title or humanSummary is required" });
+    }
+    var created = repo.AddSuggestion(req);
+    return Results.Created($"/api/suggestions/{created.Id}", created);
+});
+
+api.MapDelete("/suggestions/{id:long}", (long id, HistoryRepository repo) =>
+    repo.DeleteSuggestion(id) ? Results.NoContent() : Results.NotFound());
+
+api.MapPost("/suggestions/{id:long}/change", (
+    long id,
+    SendSuggestionChangeRequest? req,
+    HistoryRepository repo,
+    ActiveSessionTracker tracker) =>
+{
+    var suggestion = repo.GetSuggestion(id);
+    if (suggestion is null)
+    {
+        return Results.NotFound(new { error = "suggestion not found" });
+    }
+
+    var targetSessionId = !string.IsNullOrWhiteSpace(req?.TargetSessionId)
+        ? req.TargetSessionId.Trim()
+        : suggestion.SessionId;
+
+    if (string.IsNullOrWhiteSpace(targetSessionId))
+    {
+        var repoSessions = repo.GetSessionsByRepo(suggestion.Repo);
+        targetSessionId = repoSessions.FirstOrDefault(s => tracker.IsSessionActive(s.SessionId))?.SessionId
+            ?? repoSessions.FirstOrDefault()?.SessionId;
+    }
+
+    if (string.IsNullOrWhiteSpace(targetSessionId))
+    {
+        return Results.BadRequest(new { error = "No target session available for this repository" });
+    }
+
+    var item = tracker.EnqueueSuggestionChange(targetSessionId, suggestion);
+    repo.UpdateSuggestionStatus(id, "sent");
+    return Results.Accepted($"/api/sessions/{targetSessionId}/feedback/{item.Id}", new
+    {
+        item,
+        targetSessionId,
+        isSessionActive = tracker.IsSessionActive(targetSessionId)
     });
 });
 

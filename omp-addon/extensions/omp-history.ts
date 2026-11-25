@@ -266,6 +266,19 @@ interface ExtensionHostAPI {
       handler: (args: string, ctx: ExtensionContextView) => Promise<void> | void;
     },
   ) => void;
+  registerTool?: (tool: {
+    name: string;
+    label?: string;
+    description: string;
+    parameters: Record<string, unknown>;
+    execute: (
+      toolCallId: string,
+      params: Record<string, unknown>,
+      signal?: AbortSignal,
+      onUpdate?: unknown,
+      ctx?: ExtensionContextView,
+    ) => Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown }>;
+  }) => void;
 }
 
 export function extractRepoNameFromRemoteUrl(remoteUrl: string): string | undefined {
@@ -741,6 +754,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
   let promptInFlight = false;
   let turnTreeBefore: string | undefined;
   let turnQuotaBefore: CopilotQuotaSnapshot | undefined;
+  let pendingSuggestionIds: number[] = [];
 
   function ensureConfiguredBaseUrl(ctx?: ExtensionContextView): string | undefined {
     const baseUrl = resolveBaseUrl();
@@ -1009,6 +1023,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
     promptInFlight = false;
     turnTreeBefore = undefined;
     turnQuotaBefore = undefined;
+    pendingSuggestionIds = [];
     await syncSessionRegistration(ctx);
   });
 
@@ -1120,6 +1135,8 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
         measuredCredits = exactDelta;
       }
     }
+    const suggestionIds = pendingSuggestionIds.length > 0 ? [...pendingSuggestionIds] : undefined;
+    pendingSuggestionIds = [];
 
     await requestWithRetryPrompt(ctx, "POST", "/api/conversations", {
       sessionId,
@@ -1136,6 +1153,7 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
       totalTokens: turnUsage?.totalTokens,
       model: turnUsage?.model,
       copilotQuota,
+      suggestionIds,
     });
   });
 
@@ -1301,6 +1319,100 @@ export default function ompHistoryExtension(pi: ExtensionHostAPI): void {
         "error",
       );
     }
+  }
+
+  if (typeof pi.registerTool === "function") {
+    pi.registerTool({
+      name: "omp_history_suggest",
+      label: "Suggest Code Improvement",
+      description:
+        "Record a non-blocking code improvement suggestion in omp-history when you spot a genuine bug, dead code, race condition, or nonsensical logic outside the current task. Provide a human-readable summary for the user and dense technical context for a future agent.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: {
+            type: "string",
+            description: "Short, specific title for the improvement suggestion",
+          },
+          humanSummary: {
+            type: "string",
+            description: "Clear Markdown explanation for the user describing what looks wrong and why it matters",
+          },
+          agentContext: {
+            type: "string",
+            description: "Model-optimized technical context (exact file paths, symbols, root cause, invariants, and verification steps) for a future agent to propose a fix",
+          },
+          filePaths: {
+            type: "string",
+            description: "Comma-separated relative file paths affected (optional)",
+          },
+          severity: {
+            type: "string",
+            enum: ["bug", "refactor", "perf", "dead-code", "security", "cleanup"],
+            description: "Category/severity tag (optional)",
+          },
+        },
+        required: ["title", "humanSummary", "agentContext"],
+      },
+      execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+        const baseUrl = resolveBaseUrl();
+        if (!baseUrl) {
+          return {
+            content: [{ type: "text", text: "omp-history is not configured (OMP_HISTORY_URL / OMP_HISTORY_PORT unset)." }],
+          };
+        }
+        const effectiveCwd = ctx?.cwd || process.cwd();
+        const repo = lastKnownRepo ?? resolveRepoName(effectiveCwd);
+        const repoPath = resolveRepoRootPath(effectiveCwd);
+        const sessionId = (ctx ? readSessionId(ctx) : undefined) ?? activeSessionId;
+
+        const payload = {
+          repo,
+          repoPath,
+          sessionId,
+          title: typeof params?.title === "string" ? params.title : "Code improvement suggestion",
+          humanSummary: typeof params?.humanSummary === "string" ? params.humanSummary : "",
+          agentContext: typeof params?.agentContext === "string" ? params.agentContext : "",
+          filePaths: typeof params?.filePaths === "string" ? params.filePaths : undefined,
+          severity: typeof params?.severity === "string" ? params.severity : undefined,
+        };
+
+        try {
+          const res = await fetch(`${baseUrl}/api/suggestions`, {
+            method: "POST",
+            headers: buildRequestHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify(payload),
+            signal: AbortSignal.timeout(4000),
+          });
+          if (!res.ok) {
+            return {
+              content: [{ type: "text", text: `Failed to record suggestion in omp-history (HTTP ${res.status}).` }],
+            };
+          }
+          const created = (await res.json()) as { id?: number; title?: string };
+          if (typeof created?.id === "number" && created.id > 0) {
+            pendingSuggestionIds.push(created.id);
+          }
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Recorded suggestion #${created?.id ?? "?"} ("${created?.title ?? payload.title}") in omp-history for repo "${repo}".`,
+              },
+            ],
+          };
+        } catch (err) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Error recording suggestion in omp-history: ${err instanceof Error ? err.message : String(err)}`,
+              },
+            ],
+          };
+        }
+      },
+    });
   }
 
   pi.registerCommand("omp-history", {

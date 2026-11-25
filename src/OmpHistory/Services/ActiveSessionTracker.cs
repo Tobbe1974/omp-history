@@ -284,6 +284,48 @@ public sealed class ActiveSessionTracker
         return item;
     }
 
+    public FeedbackItem EnqueueSuggestionChange(string sessionId, SuggestionRecord suggestion)
+    {
+        var trimmedSessionId = sessionId.Trim();
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"### Change suggestion: {suggestion.Title}");
+        sb.AppendLine();
+        sb.AppendLine("How would we fix this? Please review the suggestion below and propose a fix before making changes.");
+        if (!string.IsNullOrWhiteSpace(suggestion.FilePaths))
+        {
+            sb.AppendLine();
+            sb.AppendLine($"**Files:** `{suggestion.FilePaths.Trim()}`");
+        }
+        if (!string.IsNullOrWhiteSpace(suggestion.HumanSummary))
+        {
+            sb.AppendLine();
+            sb.AppendLine("#### Summary");
+            sb.AppendLine(suggestion.HumanSummary.Trim());
+        }
+        if (!string.IsNullOrWhiteSpace(suggestion.AgentContext))
+        {
+            sb.AppendLine();
+            sb.AppendLine("#### Technical Context");
+            sb.AppendLine(suggestion.AgentContext.Trim());
+        }
+
+        var formattedMessage = sb.ToString().Trim();
+        var item = new FeedbackItem(
+            Id: Guid.NewGuid().ToString("N"),
+            SessionId: trimmedSessionId,
+            ConversationId: suggestion.ConversationId,
+            QuotedText: null,
+            Comment: formattedMessage,
+            FormattedMessage: formattedMessage,
+            CreatedAt: DateTime.UtcNow.ToString("O"),
+            LocationContext: suggestion.FilePaths);
+
+        var queue = _pendingFeedback.GetOrAdd(trimmedSessionId, _ => new ConcurrentQueue<FeedbackItem>());
+        queue.Enqueue(item);
+        _notifier.NotifyChanged();
+        return item;
+    }
+
     public IReadOnlyList<FeedbackItem> DequeuePendingFeedback(string sessionId)
     {
         if (string.IsNullOrWhiteSpace(sessionId))

@@ -78,6 +78,25 @@ public sealed class HistoryRepository
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                repo_path TEXT,
+                session_id TEXT,
+                conversation_id INTEGER,
+                title TEXT NOT NULL,
+                human_summary TEXT NOT NULL,
+                agent_context TEXT NOT NULL,
+                file_paths TEXT,
+                severity TEXT,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_suggestions_repo ON suggestions(repo);
+            CREATE INDEX IF NOT EXISTS idx_suggestions_conversation_id ON suggestions(conversation_id);
             """;
         cmd.ExecuteNonQuery();
 
@@ -260,7 +279,8 @@ public sealed class HistoryRepository
         double? creditsUsed = null,
         double? costUsd = null,
         long? totalTokens = null,
-        string? model = null)
+        string? model = null,
+        IReadOnlyList<long>? suggestionIds = null)
     {
         var now = DateTime.UtcNow.ToString("O");
         var normalizedRepoPath = string.IsNullOrWhiteSpace(repoPath) ? null : repoPath.Trim();
@@ -331,6 +351,29 @@ public sealed class HistoryRepository
             insertCmd.Parameters.AddWithValue("$model", (object?)normalizedModel ?? DBNull.Value);
             id = (long)insertCmd.ExecuteScalar()!;
         }
+        var linkedSuggestions = 0;
+        if (suggestionIds is { Count: > 0 })
+        {
+            foreach (var sugId in suggestionIds.Distinct())
+            {
+                if (sugId <= 0) continue;
+                using var linkCmd = conn.CreateCommand();
+                linkCmd.Transaction = tx;
+                linkCmd.CommandText = """
+                    UPDATE suggestions
+                    SET conversation_id = $convId,
+                        session_id = COALESCE(session_id, $sessionId),
+                        updated_at = $now
+                    WHERE id = $sugId;
+                    """;
+                linkCmd.Parameters.AddWithValue("$convId", id);
+                linkCmd.Parameters.AddWithValue("$sessionId", sessionId);
+                linkCmd.Parameters.AddWithValue("$now", now);
+                linkCmd.Parameters.AddWithValue("$sugId", sugId);
+                linkedSuggestions += linkCmd.ExecuteNonQuery();
+            }
+        }
+
 
         tx.Commit();
         _notifier.NotifyConversationAdded(effectiveRepo, sessionId, id);
@@ -347,7 +390,8 @@ public sealed class HistoryRepository
             creditsUsed,
             costUsd,
             totalTokens,
-            normalizedModel);
+            normalizedModel,
+            linkedSuggestions);
     }
 
     public IReadOnlyList<RepoSummary> GetRepos()
@@ -640,10 +684,22 @@ public sealed class HistoryRepository
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT id, session_id, prompt, response_md, created_at, diff_patch, git_tree_before, git_tree_after, credits_used, cost_usd, total_tokens, model
-            FROM conversations
-            WHERE session_id = $sessionId
-            ORDER BY id ASC;
+            SELECT c.id,
+                   c.session_id,
+                   c.prompt,
+                   c.response_md,
+                   c.created_at,
+                   c.diff_patch,
+                   c.git_tree_before,
+                   c.git_tree_after,
+                   c.credits_used,
+                   c.cost_usd,
+                   c.total_tokens,
+                   c.model,
+                   (SELECT COUNT(*) FROM suggestions sg WHERE sg.conversation_id = c.id) AS suggestion_count
+            FROM conversations c
+            WHERE c.session_id = $sessionId
+            ORDER BY c.id ASC;
             """;
         cmd.Parameters.AddWithValue("$sessionId", sessionId);
 
@@ -663,7 +719,8 @@ public sealed class HistoryRepository
                 reader.IsDBNull(8) ? null : reader.GetDouble(8),
                 reader.IsDBNull(9) ? null : reader.GetDouble(9),
                 reader.IsDBNull(10) ? null : reader.GetInt64(10),
-                reader.IsDBNull(11) ? null : reader.GetString(11)));
+                reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.GetInt32(12)));
         }
         return list;
     }
@@ -677,9 +734,21 @@ public sealed class HistoryRepository
         using (var cmd = conn.CreateCommand())
         {
             cmd.CommandText = """
-                SELECT id, session_id, prompt, response_md, created_at, diff_patch, git_tree_before, git_tree_after, credits_used, cost_usd, total_tokens, model
-                FROM conversations
-                WHERE id = $id
+                SELECT c.id,
+                       c.session_id,
+                       c.prompt,
+                       c.response_md,
+                       c.created_at,
+                       c.diff_patch,
+                       c.git_tree_before,
+                       c.git_tree_after,
+                       c.credits_used,
+                       c.cost_usd,
+                       c.total_tokens,
+                       c.model,
+                       (SELECT COUNT(*) FROM suggestions sg WHERE sg.conversation_id = c.id) AS suggestion_count
+                FROM conversations c
+                WHERE c.id = $id
                 LIMIT 1;
                 """;
             cmd.Parameters.AddWithValue("$id", conversationId);
@@ -699,7 +768,8 @@ public sealed class HistoryRepository
                     reader.IsDBNull(8) ? null : reader.GetDouble(8),
                     reader.IsDBNull(9) ? null : reader.GetDouble(9),
                     reader.IsDBNull(10) ? null : reader.GetInt64(10),
-                    reader.IsDBNull(11) ? null : reader.GetString(11));
+                    reader.IsDBNull(11) ? null : reader.GetString(11),
+                    reader.GetInt32(12));
             }
         }
 
@@ -757,13 +827,21 @@ public sealed class HistoryRepository
         var ntfyTopic = dict.TryGetValue("ntfy_topic", out var top) && !string.IsNullOrWhiteSpace(top)
             ? top.Trim().Trim('/')
             : "omp-history";
+        var askBeforeDeleteSession = !dict.TryGetValue("ask_before_delete_session", out var askSessStr)
+            || !bool.TryParse(askSessStr, out var parsedAskSess)
+            || parsedAskSess;
+        var askBeforeDeleteSuggestion = !dict.TryGetValue("ask_before_delete_suggestion", out var askSugStr)
+            || !bool.TryParse(askSugStr, out var parsedAskSug)
+            || parsedAskSug;
 
         return new AppSettingsRecord(
             AutoSelectNewConversation: autoSelect,
             PinLists: pinLists,
             NtfyEnabled: ntfyEnabled,
             NtfyServerUrl: ntfyServerUrl,
-            NtfyTopic: ntfyTopic);
+            NtfyTopic: ntfyTopic,
+            AskBeforeDeleteSession: askBeforeDeleteSession,
+            AskBeforeDeleteSuggestion: askBeforeDeleteSuggestion);
     }
 
     public AppSettingsRecord SaveAppSettings(AppSettingsRecord settings)
@@ -780,7 +858,9 @@ public sealed class HistoryRepository
             PinLists: settings.PinLists,
             NtfyEnabled: settings.NtfyEnabled,
             NtfyServerUrl: normalizedServer,
-            NtfyTopic: normalizedTopic);
+            NtfyTopic: normalizedTopic,
+            AskBeforeDeleteSession: settings.AskBeforeDeleteSession,
+            AskBeforeDeleteSuggestion: settings.AskBeforeDeleteSuggestion);
 
         var pairs = new (string Key, string Value)[]
         {
@@ -788,7 +868,9 @@ public sealed class HistoryRepository
             ("pin_lists", normalized.PinLists ? "true" : "false"),
             ("ntfy_enabled", normalized.NtfyEnabled ? "true" : "false"),
             ("ntfy_server_url", normalized.NtfyServerUrl),
-            ("ntfy_topic", normalized.NtfyTopic)
+            ("ntfy_topic", normalized.NtfyTopic),
+            ("ask_before_delete_session", normalized.AskBeforeDeleteSession ? "true" : "false"),
+            ("ask_before_delete_suggestion", normalized.AskBeforeDeleteSuggestion ? "true" : "false")
         };
 
         using (var conn = OpenConnection())
@@ -813,6 +895,143 @@ public sealed class HistoryRepository
         _notifier.NotifyChanged();
         return normalized;
     }
+
+    public SuggestionRecord AddSuggestion(CreateSuggestionRequest req)
+    {
+        var now = DateTime.UtcNow.ToString("O");
+        var normalizedRepo = string.IsNullOrWhiteSpace(req.Repo) ? "unknown" : req.Repo.Trim();
+        var normalizedRepoPath = string.IsNullOrWhiteSpace(req.RepoPath) ? null : req.RepoPath.Trim();
+        var normalizedSessionId = string.IsNullOrWhiteSpace(req.SessionId) ? null : req.SessionId.Trim();
+        var normalizedTitle = string.IsNullOrWhiteSpace(req.Title) ? "Code improvement suggestion" : req.Title.Trim();
+        var normalizedHuman = req.HumanSummary?.Trim() ?? string.Empty;
+        var normalizedAgent = req.AgentContext?.Trim() ?? string.Empty;
+        var normalizedFiles = string.IsNullOrWhiteSpace(req.FilePaths) ? null : req.FilePaths.Trim();
+        var normalizedSeverity = string.IsNullOrWhiteSpace(req.Severity) ? null : req.Severity.Trim().ToLowerInvariant();
+
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO suggestions (repo, repo_path, session_id, conversation_id, title, human_summary, agent_context, file_paths, severity, status, created_at, updated_at)
+            VALUES ($repo, $repoPath, $sessionId, $convId, $title, $humanSummary, $agentContext, $filePaths, $severity, 'open', $now, $now);
+            SELECT last_insert_rowid();
+            """;
+        cmd.Parameters.AddWithValue("$repo", normalizedRepo);
+        cmd.Parameters.AddWithValue("$repoPath", (object?)normalizedRepoPath ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$sessionId", (object?)normalizedSessionId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$convId", (object?)req.ConversationId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$title", normalizedTitle);
+        cmd.Parameters.AddWithValue("$humanSummary", normalizedHuman);
+        cmd.Parameters.AddWithValue("$agentContext", normalizedAgent);
+        cmd.Parameters.AddWithValue("$filePaths", (object?)normalizedFiles ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$severity", (object?)normalizedSeverity ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$now", now);
+
+        var id = (long)cmd.ExecuteScalar()!;
+        _notifier.NotifyChanged();
+
+        return new SuggestionRecord(
+            id,
+            normalizedRepo,
+            normalizedRepoPath,
+            normalizedSessionId,
+            req.ConversationId,
+            normalizedTitle,
+            normalizedHuman,
+            normalizedAgent,
+            normalizedFiles,
+            normalizedSeverity,
+            "open",
+            now,
+            now);
+    }
+
+    public IReadOnlyList<SuggestionRecord> GetSuggestionsByRepo(string repo)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, repo, repo_path, session_id, conversation_id, title, human_summary, agent_context, file_paths, severity, status, created_at, updated_at
+            FROM suggestions
+            WHERE repo = $repo
+            ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, id DESC;
+            """;
+        cmd.Parameters.AddWithValue("$repo", repo);
+
+        var list = new List<SuggestionRecord>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            list.Add(ReadSuggestionRecord(reader));
+        }
+        return list;
+    }
+
+    public SuggestionRecord? GetSuggestion(long id)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, repo, repo_path, session_id, conversation_id, title, human_summary, agent_context, file_paths, severity, status, created_at, updated_at
+            FROM suggestions
+            WHERE id = $id
+            LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("$id", id);
+        using var reader = cmd.ExecuteReader();
+        return reader.Read() ? ReadSuggestionRecord(reader) : null;
+    }
+
+    public bool UpdateSuggestionStatus(long id, string status)
+    {
+        var now = DateTime.UtcNow.ToString("O");
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            UPDATE suggestions
+            SET status = $status, updated_at = $now
+            WHERE id = $id;
+            """;
+        cmd.Parameters.AddWithValue("$id", id);
+        cmd.Parameters.AddWithValue("$status", status);
+        cmd.Parameters.AddWithValue("$now", now);
+        var rows = cmd.ExecuteNonQuery();
+        if (rows > 0)
+        {
+            _notifier.NotifyChanged();
+            return true;
+        }
+        return false;
+    }
+
+    public bool DeleteSuggestion(long id)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM suggestions WHERE id = $id;";
+        cmd.Parameters.AddWithValue("$id", id);
+        var rows = cmd.ExecuteNonQuery();
+        if (rows > 0)
+        {
+            _notifier.NotifyChanged();
+            return true;
+        }
+        return false;
+    }
+
+    private static SuggestionRecord ReadSuggestionRecord(SqliteDataReader reader) => new(
+        reader.GetInt64(0),
+        reader.GetString(1),
+        reader.IsDBNull(2) ? null : reader.GetString(2),
+        reader.IsDBNull(3) ? null : reader.GetString(3),
+        reader.IsDBNull(4) ? null : reader.GetInt64(4),
+        reader.GetString(5),
+        reader.GetString(6),
+        reader.GetString(7),
+        reader.IsDBNull(8) ? null : reader.GetString(8),
+        reader.IsDBNull(9) ? null : reader.GetString(9),
+        reader.GetString(10),
+        reader.GetString(11),
+        reader.GetString(12));
 
     private static string FirstLinePreview(string text, int maxLen)
     {

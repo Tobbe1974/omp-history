@@ -91,6 +91,15 @@
             </button>
 
             <button type="button"
+                    class="pin-panes-btn @(_leftPaneTab == "suggestions" ? "active" : "")"
+                    title="View change suggestions for the selected repository"
+                    aria-label="Suggestions"
+                    disabled="@string.IsNullOrEmpty(_selectedRepo)"
+                    @onclick="OpenSuggestionsTab">
+                <span>Suggestions (@OpenSuggestionCount)</span>
+            </button>
+
+            <button type="button"
                     class="pin-panes-btn @(_isPanesPinned ? "active" : "")"
                     title="@(_isPanesPinned ? "Unpin to hide Sessions and Conversations" : "Pin to show Sessions and Conversations")"
                     aria-label="Pin Sessions and Conversations panes"
@@ -113,12 +122,76 @@
         @if (_isPanesPinned)
         {
         <aside class="pane sessions-pane" aria-label="Sessions">
-            <div class="pane-header">
-                <span>SESSIONS @(string.IsNullOrEmpty(_selectedRepo) ? "" : $"({_sessions.Count})")</span>
+            <div class="pane-header pane-tabs-header">
+                <div class="pane-tabs" role="tablist" aria-label="Sessions and Suggestions">
+                    <button type="button"
+                            role="tab"
+                            aria-selected="@(_leftPaneTab == "sessions" ? "true" : "false")"
+                            class="pane-tab @(_leftPaneTab == "sessions" ? "active" : "")"
+                            @onclick='() => SetLeftPaneTab("sessions")'>
+                        SESSIONS @(string.IsNullOrEmpty(_selectedRepo) ? "" : $"({_sessions.Count})")
+                    </button>
+                    <button type="button"
+                            role="tab"
+                            aria-selected="@(_leftPaneTab == "suggestions" ? "true" : "false")"
+                            class="pane-tab @(_leftPaneTab == "suggestions" ? "active" : "")"
+                            @onclick='() => SetLeftPaneTab("suggestions")'>
+                        SUGGESTIONS @(string.IsNullOrEmpty(_selectedRepo) ? "" : $"({_suggestions.Count})")
+                    </button>
+                </div>
             </div>
-
             <div class="pane-body">
-                @if (string.IsNullOrEmpty(_selectedRepo))
+                @if (_leftPaneTab == "suggestions")
+                {
+                    @if (string.IsNullOrEmpty(_selectedRepo))
+                    {
+                        <div class="empty-state">Select a repository to view suggestions.</div>
+                    }
+                    else if (_suggestions.Count == 0)
+                    {
+                        <div class="empty-state">No suggestions recorded for <strong>@_selectedRepo</strong> yet.</div>
+                    }
+                    else
+                    {
+                        @foreach (var sug in _suggestions)
+                        {
+                            var isSelected = _selectedSuggestionId == sug.Id;
+                            <div class="list-card session-card suggestion-card @(isSelected ? "selected" : "") @(sug.Status == "sent" ? "suggestion-sent" : "")"
+                                 @onclick="() => SelectSuggestion(sug.Id)"
+                                 @oncontextmenu="(e) => OpenSuggestionContextMenu(e, sug)"
+                                 @oncontextmenu:preventDefault="true">
+                                <div class="session-card-main">
+                                    <div class="session-title-row">
+                                        <div class="session-title" title="@sug.Title">@sug.Title</div>
+                                        @if (!string.IsNullOrWhiteSpace(sug.Severity))
+                                        {
+                                            <span class="suggestion-severity-badge severity-@sug.Severity">@sug.Severity.ToUpperInvariant()</span>
+                                        }
+                                        <span class="suggestion-status-badge status-@sug.Status">@sug.Status.ToUpperInvariant()</span>
+                                    </div>
+                                    @if (!string.IsNullOrWhiteSpace(sug.FilePaths))
+                                    {
+                                        <div class="session-id suggestion-files" title="@sug.FilePaths">@sug.FilePaths</div>
+                                    }
+                                    <div class="session-meta">
+                                        <span>#@sug.Id</span>
+                                        <span>•</span>
+                                        <span title="@sug.CreatedAt">@FormatFullDateTime(sug.CreatedAt)</span>
+                                    </div>
+                                </div>
+                                <button type="button"
+                                        class="delete-session-btn"
+                                        title="Remove suggestion"
+                                        aria-label="Remove suggestion @sug.Title"
+                                        @onclick:stopPropagation="true"
+                                        @onclick="() => RequestDeleteSuggestion(sug)">
+                                    ×
+                                </button>
+                            </div>
+                        }
+                    }
+                }
+                else if (string.IsNullOrEmpty(_selectedRepo))
                 {
                     <div class="empty-state">Select or create a session from OMP to begin.</div>
                 }
@@ -169,7 +242,6 @@
                     }
                 }
             </div>
-
             <div class="sessions-footer">
                 @if (_isSettingsOpen)
                 {
@@ -186,6 +258,18 @@
                                    checked="@_autoSelectNewConversation"
                                    @onchange="OnAutoSelectChanged" />
                             <span>Auto-select new conversations</span>
+                        </label>
+                        <label class="settings-checkbox-row">
+                            <input type="checkbox"
+                                   checked="@_askBeforeDeleteSession"
+                                   @onchange="OnAskBeforeDeleteSessionChanged" />
+                            <span>Ask before delete (Sessions)</span>
+                        </label>
+                        <label class="settings-checkbox-row">
+                            <input type="checkbox"
+                                   checked="@_askBeforeDeleteSuggestion"
+                                   @onchange="OnAskBeforeDeleteSuggestionChanged" />
+                            <span>Ask before delete (Suggestions)</span>
                         </label>
                         <label class="settings-checkbox-row">
                             <input type="checkbox"
@@ -317,6 +401,13 @@
                                     else if (hasTreeSnapshot)
                                     {
                                         <span class="turn-snapshot-dot" title="Git snapshot recorded for this turn"></span>
+                                    }
+                                    @if (conv.SuggestionCount > 0)
+                                    {
+                                        <span class="turn-suggestion-badge"
+                                              title="@($"{conv.SuggestionCount} change {(conv.SuggestionCount == 1 ? "suggestion" : "suggestions")} noted during this turn")">
+                                            💡 @conv.SuggestionCount
+                                        </span>
                                     }
                                     <span class="turn-credits-badge @(conv.CreditsUsed.HasValue ? "" : "usage-na")"
                                           title="@FormatUsageTooltip(conv.CreditsUsed, conv.CostUsd, conv.TotalTokens, conv.Model)">
@@ -671,6 +762,66 @@
                     }
                 </div>
             }
+            else if (_leftPaneTab == "suggestions" && SelectedSuggestion is not null)
+            {
+                <div class="detail-scroll" @onclick="CloseSuggestionContextMenu">
+                    <section class="detail-section suggestion-detail-header">
+                        <div class="section-label">
+                            <div class="section-label-left">
+                                <span>CHANGE SUGGESTION #@SelectedSuggestion.Id</span>
+                                @if (!string.IsNullOrWhiteSpace(SelectedSuggestion.Severity))
+                                {
+                                    <span class="suggestion-severity-badge severity-@SelectedSuggestion.Severity">@SelectedSuggestion.Severity.ToUpperInvariant()</span>
+                                }
+                                <span class="suggestion-status-badge status-@SelectedSuggestion.Status">@SelectedSuggestion.Status.ToUpperInvariant()</span>
+                            </div>
+                            <div class="suggestion-detail-actions">
+                                @if (!string.IsNullOrEmpty(_suggestionStatusMessage))
+                                {
+                                    <span class="feedback-status-pill">@_suggestionStatusMessage</span>
+                                }
+                                <button type="button"
+                                        class="filter-btn filter-btn-primary"
+                                        @onclick="() => SendSuggestionChange(SelectedSuggestion)">
+                                    Change suggestion
+                                </button>
+                                <button type="button"
+                                        class="filter-btn filter-btn-danger"
+                                        @onclick="() => RequestDeleteSuggestion(SelectedSuggestion)">
+                                    Remove
+                                </button>
+                            </div>
+                        </div>
+                        <h2 class="suggestion-detail-title">@SelectedSuggestion.Title</h2>
+                        @if (!string.IsNullOrWhiteSpace(SelectedSuggestion.FilePaths))
+                        {
+                            <div class="suggestion-detail-files">Files: <code>@SelectedSuggestion.FilePaths</code></div>
+                        }
+                    </section>
+
+                    <section class="detail-section response-section">
+                        <div class="section-label">
+                            <span>HUMAN SUMMARY</span>
+                            <span class="section-timestamp">@FormatTimestamp(SelectedSuggestion.CreatedAt)</span>
+                        </div>
+                        <div class="markdown-body">
+                            @((MarkupString)RenderMarkdown(SelectedSuggestion.HumanSummary))
+                        </div>
+                    </section>
+
+                    @if (!string.IsNullOrWhiteSpace(SelectedSuggestion.AgentContext))
+                    {
+                        <section class="detail-section">
+                            <div class="section-label">
+                                <span>AGENT IMPLEMENTATION CONTEXT</span>
+                            </div>
+                            <div class="markdown-body">
+                                @((MarkupString)RenderMarkdown(SelectedSuggestion.AgentContext))
+                            </div>
+                        </section>
+                    }
+                </div>
+            }
             else if (SelectedConversation is null)
             {
                 <div class="empty-detail">
@@ -706,6 +857,15 @@
                                         <span> • @FormatTokens(SelectedConversation.TotalTokens.Value) tok</span>
                                     }
                                 </span>
+                                @if (SelectedConversation.SuggestionCount > 0)
+                                {
+                                    <button type="button"
+                                            class="turn-suggestion-link-pill"
+                                            title="View suggestion(s) recorded during this turn"
+                                            @onclick="() => JumpToConversationSuggestions(SelectedConversation.Id)">
+                                        💡 @SelectedConversation.SuggestionCount @(SelectedConversation.SuggestionCount == 1 ? "Suggestion" : "Suggestions")
+                                    </button>
+                                }
                                 <span class="response-context-hint">Select text &amp; right-click to comment</span>
                             </div>
                             @if (!string.IsNullOrEmpty(_feedbackStatusMessage))
@@ -1009,6 +1169,48 @@
             </div>
         </div>
     }
+
+    @if (_suggestionToDelete is not null)
+    {
+        <div class="filter-modal-backdrop" @onclick="CancelDeleteSuggestion">
+            <div class="filter-modal-window" role="dialog" aria-modal="true" aria-label="Delete Suggestion Confirmation" @onclick:stopPropagation="true">
+                <div class="filter-modal-header">
+                    <span class="filter-modal-title">Remove Suggestion</span>
+                    <button type="button" class="filter-modal-close" aria-label="Close remove confirmation" @onclick="CancelDeleteSuggestion">×</button>
+                </div>
+                <div class="filter-modal-body">
+                    <div class="delete-confirm-text">
+                        Are you sure you want to remove <strong>@_suggestionToDelete.Title</strong>?
+                    </div>
+                </div>
+                <div class="filter-modal-footer">
+                    <button type="button" class="filter-btn filter-btn-secondary" @onclick="CancelDeleteSuggestion">
+                        Cancel
+                    </button>
+                    <button type="button" class="filter-btn filter-btn-danger" @onclick="ConfirmDeleteSuggestion">
+                        Remove
+                    </button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (_contextMenuSuggestion is not null)
+    {
+        <div class="suggestion-context-backdrop" @onclick="CloseSuggestionContextMenu">
+            <div class="suggestion-context-menu"
+                 style="left: @(_suggestionContextLeftPx)px; top: @(_suggestionContextTopPx)px;"
+                 role="menu"
+                 @onclick:stopPropagation="true">
+                <button type="button" class="suggestion-context-item" role="menuitem" @onclick="() => { var s = _contextMenuSuggestion!; CloseSuggestionContextMenu(); SendSuggestionChange(s); }">
+                    Change suggestion
+                </button>
+                <button type="button" class="suggestion-context-item" role="menuitem" @onclick="() => { var s = _contextMenuSuggestion!; CloseSuggestionContextMenu(); RequestDeleteSuggestion(s); }">
+                    Remove
+                </button>
+            </div>
+        </div>
+    }
 </div>
 
 @code {
@@ -1030,6 +1232,14 @@
     private string? _selectedRepo;
     private string? _selectedSessionId;
     private long? _selectedConversationId;
+    private IReadOnlyList<SuggestionRecord> _suggestions = [];
+    private string _leftPaneTab = "sessions";
+    private long? _selectedSuggestionId;
+    private SuggestionRecord? _suggestionToDelete;
+    private SuggestionRecord? _contextMenuSuggestion;
+    private int _suggestionContextLeftPx;
+    private int _suggestionContextTopPx;
+    private string? _suggestionStatusMessage;
 
     private bool _isFilterModalOpen;
     private string _filterDraft = string.Empty;
@@ -1043,6 +1253,8 @@
     private string? _ntfyStatusMessage;
     private ConversationAddedEvent? _pendingAutoSelect;
     private SessionRecord? _sessionToDelete;
+    private bool _askBeforeDeleteSession = true;
+    private bool _askBeforeDeleteSuggestion = true;
     private bool _isPanesPinned = true;
     private bool _isFeedbackOpen;
     private int _feedbackOpenNonce;
@@ -1117,6 +1329,13 @@
         _selectedConversationId.HasValue
             ? FilteredConversations.Select(x => x.Record).FirstOrDefault(c => c.Id == _selectedConversationId.Value)
             : null;
+
+    private SuggestionRecord? SelectedSuggestion =>
+        _selectedSuggestionId.HasValue
+            ? _suggestions.FirstOrDefault(s => s.Id == _selectedSuggestionId.Value)
+            : null;
+
+    private int OpenSuggestionCount => _suggestions.Count(s => string.Equals(s.Status, "open", StringComparison.OrdinalIgnoreCase));
 
     private int? SelectedTurnNumber =>
         _selectedConversationId.HasValue
@@ -1269,10 +1488,17 @@
             _selectedSessionId = null;
             _conversations = [];
             _selectedConversationId = null;
+            _suggestions = [];
+            _selectedSuggestionId = null;
             return;
         }
 
         _sessions = Repository.GetSessionsByRepo(_selectedRepo);
+        _suggestions = Repository.GetSuggestionsByRepo(_selectedRepo);
+        if (!_selectedSuggestionId.HasValue || !_suggestions.Any(s => s.Id == _selectedSuggestionId.Value))
+        {
+            _selectedSuggestionId = _suggestions.FirstOrDefault()?.Id;
+        }
 
         if (_sessions.Count == 0)
         {
@@ -1359,6 +1585,8 @@
         _ntfyEnabled = s.NtfyEnabled;
         _ntfyServerUrl = s.NtfyServerUrl;
         _ntfyTopic = s.NtfyTopic;
+        _askBeforeDeleteSession = s.AskBeforeDeleteSession;
+        _askBeforeDeleteSuggestion = s.AskBeforeDeleteSuggestion;
     }
 
     private void PersistGlobalSettings()
@@ -1368,12 +1596,16 @@
             PinLists: _isPanesPinned,
             NtfyEnabled: _ntfyEnabled,
             NtfyServerUrl: _ntfyServerUrl,
-            NtfyTopic: _ntfyTopic));
+            NtfyTopic: _ntfyTopic,
+            AskBeforeDeleteSession: _askBeforeDeleteSession,
+            AskBeforeDeleteSuggestion: _askBeforeDeleteSuggestion));
         _autoSelectNewConversation = saved.AutoSelectNewConversation;
         _isPanesPinned = saved.PinLists;
         _ntfyEnabled = saved.NtfyEnabled;
         _ntfyServerUrl = saved.NtfyServerUrl;
         _ntfyTopic = saved.NtfyTopic;
+        _askBeforeDeleteSession = saved.AskBeforeDeleteSession;
+        _askBeforeDeleteSuggestion = saved.AskBeforeDeleteSuggestion;
     }
 
     private void OnAutoSelectChanged(ChangeEventArgs e)
@@ -1382,6 +1614,17 @@
         PersistGlobalSettings();
     }
 
+    private void OnAskBeforeDeleteSessionChanged(ChangeEventArgs e)
+    {
+        _askBeforeDeleteSession = e.Value is bool b ? b : true;
+        PersistGlobalSettings();
+    }
+
+    private void OnAskBeforeDeleteSuggestionChanged(ChangeEventArgs e)
+    {
+        _askBeforeDeleteSuggestion = e.Value is bool b ? b : true;
+        PersistGlobalSettings();
+    }
     private void OnNtfyEnabledChanged(ChangeEventArgs e)
     {
         _ntfyEnabled = e.Value is bool b && b;
@@ -1858,9 +2101,115 @@
 
     private void RequestDeleteSession(SessionRecord session)
     {
+        if (!_askBeforeDeleteSession)
+        {
+            _sessionToDelete = session;
+            ConfirmDeleteSession();
+            return;
+        }
         _sessionToDelete = session;
     }
 
+    private void SetLeftPaneTab(string tab)
+    {
+        _leftPaneTab = tab;
+        _suggestionStatusMessage = null;
+        CloseSuggestionContextMenu();
+    }
+
+    private void OpenSuggestionsTab()
+    {
+        _isPanesPinned = true;
+        _leftPaneTab = "suggestions";
+        _isGitCompareOpen = false;
+        _suggestionStatusMessage = null;
+    }
+
+    private void SelectSuggestion(long suggestionId)
+    {
+        _selectedSuggestionId = suggestionId;
+        _isGitCompareOpen = false;
+        _suggestionStatusMessage = null;
+        CloseSuggestionContextMenu();
+    }
+
+    private void JumpToConversationSuggestions(long conversationId)
+    {
+        var match = _suggestions.FirstOrDefault(s => s.ConversationId == conversationId)
+            ?? _suggestions.FirstOrDefault();
+        _isPanesPinned = true;
+        _leftPaneTab = "suggestions";
+        _isGitCompareOpen = false;
+        if (match is not null)
+        {
+            _selectedSuggestionId = match.Id;
+        }
+    }
+
+    private void OpenSuggestionContextMenu(MouseEventArgs e, SuggestionRecord sug)
+    {
+        _selectedSuggestionId = sug.Id;
+        _contextMenuSuggestion = sug;
+        _suggestionContextLeftPx = (int)Math.Max(12, e.ClientX);
+        _suggestionContextTopPx = (int)Math.Max(12, e.ClientY);
+    }
+
+    private void CloseSuggestionContextMenu()
+    {
+        _contextMenuSuggestion = null;
+    }
+
+    private void RequestDeleteSuggestion(SuggestionRecord sug)
+    {
+        if (!_askBeforeDeleteSuggestion)
+        {
+            DeleteSuggestionCore(sug.Id);
+            return;
+        }
+        _suggestionToDelete = sug;
+    }
+
+    private void CancelDeleteSuggestion()
+    {
+        _suggestionToDelete = null;
+    }
+
+    private void ConfirmDeleteSuggestion()
+    {
+        if (_suggestionToDelete is null) return;
+        var id = _suggestionToDelete.Id;
+        _suggestionToDelete = null;
+        DeleteSuggestionCore(id);
+    }
+
+    private void DeleteSuggestionCore(long id)
+    {
+        if (_selectedSuggestionId == id)
+        {
+            _selectedSuggestionId = null;
+        }
+        Repository.DeleteSuggestion(id);
+    }
+
+    private void SendSuggestionChange(SuggestionRecord sug)
+    {
+        var targetSessionId = !string.IsNullOrWhiteSpace(_selectedSessionId) && IsSelectedSessionActive
+            ? _selectedSessionId
+            : (ActiveSessionInRepo?.SessionId ?? sug.SessionId ?? _selectedSessionId ?? _sessions.FirstOrDefault()?.SessionId);
+
+        if (string.IsNullOrWhiteSpace(targetSessionId))
+        {
+            _suggestionStatusMessage = "No session available for this repository";
+            return;
+        }
+
+        var isActive = SessionTracker.IsSessionActive(targetSessionId);
+        SessionTracker.EnqueueSuggestionChange(targetSessionId, sug);
+        Repository.UpdateSuggestionStatus(sug.Id, "sent");
+        _suggestionStatusMessage = isActive
+            ? "Change suggestion sent to active OMP session"
+            : "Change suggestion queued (will deliver when session becomes active)";
+    }
     private void CancelDeleteSession()
     {
         _sessionToDelete = null;

@@ -29,7 +29,8 @@ public sealed record ConversationRecord(
     double? CreditsUsed = null,
     double? CostUsd = null,
     long? TotalTokens = null,
-    string? Model = null);
+    string? Model = null,
+    int SuggestionCount = 0);
 public sealed record CreateSessionRequest(
     string SessionId,
     string Repo,
@@ -55,7 +56,8 @@ public sealed record CreateConversationRequest(
     double? CostUsd = null,
     long? TotalTokens = null,
     string? Model = null,
-    CopilotQuotaSnapshot? CopilotQuota = null);
+    CopilotQuotaSnapshot? CopilotQuota = null,
+    IReadOnlyList<long>? SuggestionIds = null);
 public sealed record FeedbackItem(
     string Id,
     string SessionId,
@@ -101,8 +103,38 @@ public sealed record AppSettingsRecord(
     bool PinLists,
     bool NtfyEnabled,
     string NtfyServerUrl,
-    string NtfyTopic);
+    string NtfyTopic,
+    bool AskBeforeDeleteSession = true,
+    bool AskBeforeDeleteSuggestion = true);
 
+public sealed record SuggestionRecord(
+    long Id,
+    string Repo,
+    string? RepoPath,
+    string? SessionId,
+    long? ConversationId,
+    string Title,
+    string HumanSummary,
+    string AgentContext,
+    string? FilePaths,
+    string? Severity,
+    string Status,
+    string CreatedAt,
+    string UpdatedAt);
+
+public sealed record CreateSuggestionRequest(
+    string Title,
+    string HumanSummary,
+    string AgentContext,
+    string? Repo = null,
+    string? RepoPath = null,
+    string? SessionId = null,
+    long? ConversationId = null,
+    string? FilePaths = null,
+    string? Severity = null);
+
+public sealed record SendSuggestionChangeRequest(
+    string? TargetSessionId = null);
 public sealed record TurnDetailsRecord(
     ConversationRecord Conversation,
     SessionRecord Session,

@@ -35,6 +35,14 @@ alwaysApply: true
    - Lists sessions from `omp-history` for the current repo (falling back to all repos) or matches a provided `sessionId` prefix.
    - Downloads a synthesized OMP v3 `.jsonl` file from `GET /api/sessions/{sessionId}/export-jsonl?cwd=<localRepoRoot>`, writes it to `~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<sessionId>.jsonl`, and switches the live session into it via `ctx.switchSession(...)` so work continues under the exact same `sessionId`.
 
+6. **Change Suggestions (`omp_history_suggest`)**:
+   - While exploring or working on a task, if you notice a genuine bug, race condition, dead code, security issue, or nonsensical logic **outside** the user's current request, record it with `omp_history_suggest` instead of derailing the active task.
+   - Populate:
+     - `title`: short, specific summary.
+     - `humanSummary`: clear Markdown explanation for the user (what is wrong and why it matters).
+     - `agentContext`: dense, model-optimized technical payload (exact file paths, symbol names, root cause, invariants, edge cases, and verification steps) so a future agent can review and propose a fix when the user clicks **Change suggestion** in the UI.
+     - `filePaths` / `severity` (`bug`, `refactor`, `perf`, `dead-code`, `security`, `cleanup`): optional metadata.
+
 ## Output Formatting Rules (No Nested Markdown Fences)
 
 - All assistant replies logged to `omp-history` are **already rendered as Markdown**.
@@ -55,3 +63,8 @@ alwaysApply: true
 - `GET /api/repos/{repo}/sessions`
 - `GET /api/sessions/{sessionId}/conversations`
 - `GET /api/sessions/{sessionId}/export-jsonl?cwd=<path>`
+- `GET /api/repos/{repo}/suggestions`
+- `POST /api/suggestions`
+  - Body: `{ "repo": "<repo>", "repoPath": "<path>", "sessionId": "<id>", "title": "<title>", "humanSummary": "<markdown>", "agentContext": "<model-context>", "filePaths": "<paths>", "severity": "<tag>" }`
+- `POST /api/suggestions/{id}/change`
+- `DELETE /api/suggestions/{id}`
